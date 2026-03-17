@@ -94,13 +94,38 @@ class AssetCatalog:
     """Parser for .xcassets directories."""
 
     def __init__(self, path: str, platform: str = "macosx",
-                 min_deploy: str = "11.0", app_icon: Optional[str] = None):
+                 min_deploy: str = "11.0", app_icon: Optional[str] = None,
+                 include_languages: Optional[list[str]] = None,
+                 development_region: Optional[str] = None):
         self.path = path
         self.platform = platform
         self.min_deploy = min_deploy
         self.app_icon = app_icon
+        self.include_languages = include_languages
+        self.development_region = development_region
         self._identifiers: dict[str, int] = {}
         self._next_id = 1
+        self._locales_used: set[str] = set()
+
+    def _should_include_locale(self, locale: str) -> bool:
+        """Check if a locale should be included based on filtering options.
+
+        Per the manpage: if --include-language is not specified, all locales
+        are included. When specified, only the listed languages plus the
+        development region language are included. Non-localized assets
+        (locale="") are always included.
+        """
+        if not self.include_languages:
+            return True  # No filtering, include all
+
+        if locale == self.development_region:
+            return True  # Development region always included
+
+        return locale in self.include_languages
+
+    def get_locales_used(self) -> set[str]:
+        """Return the set of locale codes that were included in the output."""
+        return self._locales_used
 
     def _get_identifier(self, name: str) -> int:
         """Get or create an identifier for a facet name."""
@@ -156,6 +181,15 @@ class AssetCatalog:
                     if self.platform == "macosx" and idiom not in ("mac", "universal"):
                         continue
 
+                    locale = img_info.get("locale", "")
+
+                    # Language filtering
+                    if locale and not self._should_include_locale(locale):
+                        continue
+
+                    if locale:
+                        self._locales_used.add(locale)
+
                     pixel_data, width, height, pixel_format = load_image_as_bgra(
                         str(img_path))
 
@@ -171,6 +205,7 @@ class AssetCatalog:
                         pixel_format=pixel_format,
                         layout=car.LAYOUT_ONE_PART_SCALE,
                         is_template=is_template,
+                        locale=locale,
                     )
                     renditions.append(rend)
 

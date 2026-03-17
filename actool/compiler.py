@@ -21,6 +21,9 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
                     accent_color: str = None,
                     widget_background_color: str = None,
                     standalone_icon_behavior: str = "default",
+                    include_languages: list[str] = None,
+                    development_region: str = None,
+                    plist_localizations: bool = True,
                     warnings_list: list = None,
                     errors_list: list = None,
                     notices_list: list = None):
@@ -41,7 +44,9 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
         keyformat_attrs = car.KEYFORMAT_ATTRS_NO_ICON
 
     # Parse the asset catalog
-    catalog = AssetCatalog(xcassets_path, platform, min_deploy, app_icon)
+    catalog = AssetCatalog(xcassets_path, platform, min_deploy, app_icon,
+                           include_languages=include_languages,
+                           development_region=development_region)
     renditions, facets = catalog.parse()
 
     # Set has_icon on all renditions for correct key building
@@ -175,9 +180,11 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
 
     # Generate partial info plist
     if info_plist_path:
+        locales = sorted(catalog.get_locales_used()) if plist_localizations else []
         _write_info_plist(info_plist_path, app_icon=app_icon,
                           accent_color=accent_color,
-                          widget_background_color=widget_background_color)
+                          widget_background_color=widget_background_color,
+                          localizations=locales)
 
     # Print compilation results
     output_files = []
@@ -208,33 +215,37 @@ def _make_bitmap_info(identifier: int,
 
 def _write_info_plist(path: str, app_icon: str = None,
                       accent_color: str = None,
-                      widget_background_color: str = None):
+                      widget_background_color: str = None,
+                      localizations: list[str] = None):
     """Write the partial info plist."""
     parent = os.path.dirname(os.path.abspath(path))
     if parent:
         os.makedirs(parent, exist_ok=True)
-
-    entries = []
-    if app_icon:
-        entries.append(("\t<key>CFBundleIconFile</key>",
-                        f"\t<string>{app_icon}</string>"))
-        entries.append(("\t<key>CFBundleIconName</key>",
-                        f"\t<string>{app_icon}</string>"))
-    if accent_color:
-        entries.append(("\t<key>NSAccentColorName</key>",
-                        f"\t<string>{accent_color}</string>"))
-    if widget_background_color:
-        entries.append(("\t<key>NSWidgetBackgroundColorName</key>",
-                        f"\t<string>{widget_background_color}</string>"))
 
     lines = ['<?xml version="1.0" encoding="UTF-8"?>',
              '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
              '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
              '<plist version="1.0">',
              '<dict>']
-    for key_line, val_line in entries:
-        lines.append(key_line)
-        lines.append(val_line)
+
+    if app_icon:
+        lines.append('\t<key>CFBundleIconFile</key>')
+        lines.append(f'\t<string>{app_icon}</string>')
+        lines.append('\t<key>CFBundleIconName</key>')
+        lines.append(f'\t<string>{app_icon}</string>')
+    if accent_color:
+        lines.append('\t<key>NSAccentColorName</key>')
+        lines.append(f'\t<string>{accent_color}</string>')
+    if widget_background_color:
+        lines.append('\t<key>NSWidgetBackgroundColorName</key>')
+        lines.append(f'\t<string>{widget_background_color}</string>')
+    if localizations:
+        lines.append('\t<key>CFBundleLocalizations</key>')
+        lines.append('\t<array>')
+        for loc in localizations:
+            lines.append(f'\t\t<string>{loc}</string>')
+        lines.append('\t</array>')
+
     lines.append('</dict>')
     lines.append('</plist>')
     lines.append('')

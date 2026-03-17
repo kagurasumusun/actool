@@ -262,6 +262,14 @@ def build_packed_asset_csi(name: str, width: int, height: int,
 ELEMENT_PACKED = 9  # Element for packed assets
 
 
+def _hash_name(name: str) -> int:
+    """Hash a name to a 16-bit identifier (used for facet IDs and locale IDs)."""
+    h = 0
+    for c in name:
+        h = (h * 31 + ord(c)) & 0xFFFF
+    return h
+
+
 @dataclass
 class Rendition:
     """A single rendition (image/asset) in the CAR file."""
@@ -280,12 +288,15 @@ class Rendition:
     appearance: int = 0
     is_template: bool = False
     colorspace_id: int = 1
+    locale: str = ""  # Empty = non-localized, "en"/"fr"/etc = localized
 
     has_icon: bool = True
 
     def build_rendition_key(self) -> bytes:
+        locale_id = _hash_name(self.locale) if self.locale else 0
         return make_rendition_key(
             appearance=self.appearance,
+            unknown13=locale_id,
             element=self.element,
             part=self.part,
             identifier=self.identifier,

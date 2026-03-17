@@ -110,6 +110,20 @@ def main():
                         help="Compress PNGs (no effect on CAR contents)")
     parser.add_argument("--skip-app-store-deployment", action="store_true",
                         help="Skip App Store-specific validations")
+    parser.add_argument("--enable-on-demand-resources",
+                        metavar="YES/NO", default="NO",
+                        help="Enable on-demand resources (accepted for "
+                             "compatibility, no effect on macOS)")
+    parser.add_argument("--development-region", metavar="REGION",
+                        help="Development region (always included in output)")
+    parser.add_argument("--include-language", metavar="LANG",
+                        action="append", default=[],
+                        help="Include only specified language(s). May be "
+                             "repeated. Development region is always included.")
+    parser.add_argument("--include-partial-info-plist-localizations",
+                        choices=["yes", "no", "YES", "NO"],
+                        default="YES",
+                        help="Include CFBundleLocalizations in partial plist")
 
     # Listing
     parser.add_argument("--print-contents", action="store_true",
@@ -154,6 +168,9 @@ def main():
     errors = []
     notices = []
 
+    include_langs = args.include_language or None
+    plist_l10n = args.include_partial_info_plist_localizations.upper() != "NO"
+
     try:
         compile_catalog(
             xcassets_path=args.document,
@@ -165,6 +182,9 @@ def main():
             accent_color=args.accent_color,
             widget_background_color=args.widget_background_color,
             standalone_icon_behavior=args.standalone_icon_behavior,
+            include_languages=include_langs,
+            development_region=args.development_region,
+            plist_localizations=plist_l10n,
             warnings_list=warnings,
             errors_list=errors,
             notices_list=notices,
