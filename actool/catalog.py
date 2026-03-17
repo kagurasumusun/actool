@@ -61,12 +61,12 @@ def load_image_as_bgra(path: str) -> tuple[bytes, int, int, bytes]:
         # Grayscale + Alpha -> GA8
         img = img.convert("LA")
         pixel_data = img.tobytes()
-        return pixel_data, img.width, img.height, b"GA8 "
+        return pixel_data, img.width, img.height, b" 8AG"
     elif img.mode == "L":
         # Grayscale -> add alpha channel
         img = img.convert("LA")
         pixel_data = img.tobytes()
-        return pixel_data, img.width, img.height, b"GA8 "
+        return pixel_data, img.width, img.height, b" 8AG"
     elif img.mode == "RGB":
         # Add alpha channel, convert to BGRA
         img = img.convert("RGBA")
@@ -177,8 +177,10 @@ class AssetCatalog:
                 facets[name] = (car.ELEMENT_UNIVERSAL, car.PART_REGULAR, ident)
 
             elif item.suffix == ".appiconset":
+                if not self.app_icon:
+                    continue
                 name = item.stem
-                if self.app_icon and name != self.app_icon:
+                if name != self.app_icon:
                     continue
 
                 ident = self._get_identifier(name)

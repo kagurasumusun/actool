@@ -20,10 +20,21 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
                     info_plist_path: str = None):
     """Compile an xcassets catalog into output files."""
     os.makedirs(output_dir, exist_ok=True)
+    has_icon = app_icon is not None
+
+    # Select keyformat based on whether we have an app icon
+    if has_icon:
+        keyformat_attrs = car.KEYFORMAT_ATTRS_ICON
+    else:
+        keyformat_attrs = car.KEYFORMAT_ATTRS_NO_ICON
 
     # Parse the asset catalog
     catalog = AssetCatalog(xcassets_path, platform, min_deploy, app_icon)
     renditions, facets = catalog.parse()
+
+    # Set has_icon on all renditions for correct key building
+    for rend in renditions:
+        rend.has_icon = has_icon
 
     # Group renditions for atlas packing
     pack_groups, inline_renditions = group_for_packing(renditions)
@@ -58,6 +69,7 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
             part=car.PART_REGULAR,
             dim1=dim1_counter,
             scale=scale,
+            has_icon=has_icon,
         )
         atlas_csi = car.build_packed_asset_csi(
             name=atlas.name,
@@ -76,6 +88,7 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
                 part=car.PART_REGULAR,
                 identifier=img.identifier,
                 scale=scale,
+                has_icon=has_icon,
             )
             ref_csi = car.build_packed_image_csi(
                 name=img.name,
@@ -110,7 +123,7 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
                         car.make_carheader(len(all_rendition_entries)))
 
     # Add KEYFORMAT
-    bom.add_named_block("KEYFORMAT", car.make_keyformat())
+    bom.add_named_block("KEYFORMAT", car.make_keyformat(keyformat_attrs))
 
     # Add EXTENDED_METADATA
     bom.add_named_block("EXTENDED_METADATA",

@@ -18,9 +18,13 @@ except ImportError:
 
 
 # Rendition attribute types (key format tokens)
-KEYFORMAT_ATTRS = [7, 13, 1, 2, 3, 17, 8, 9, 11, 12]
+# With app icon: includes Dimension2 (token 9) for icon size indices
+KEYFORMAT_ATTRS_ICON = [7, 13, 1, 2, 3, 17, 8, 9, 11, 12]
+# Without app icon: no Dimension2
+KEYFORMAT_ATTRS_NO_ICON = [7, 13, 1, 2, 3, 17, 8, 11, 12]
 # 7=ThemeAppearance, 13=Unknown13, 1=Element, 2=Part, 3=Size,
 # 17=Identifier, 8=Dimension1, 9=Dimension2, 11=Layer, 12=Scale
+KEYFORMAT_ATTRS = KEYFORMAT_ATTRS_ICON  # Default (backward compat)
 
 ELEMENT_UNIVERSAL = 85  # 0x55
 PART_ICON = 220  # 0xDC - app icon part
@@ -73,10 +77,12 @@ def make_extended_metadata(platform: str, min_deploy: str) -> bytes:
     return bytes(buf)
 
 
-def make_keyformat() -> bytes:
+def make_keyformat(attrs: list[int] = None) -> bytes:
     """Build a KEYFORMAT block."""
-    buf = b"tmfk" + struct.pack("<II", 0, len(KEYFORMAT_ATTRS))  # 'kfmt' as LE
-    for attr in KEYFORMAT_ATTRS:
+    if attrs is None:
+        attrs = KEYFORMAT_ATTRS
+    buf = b"tmfk" + struct.pack("<II", 0, len(attrs))  # 'kfmt' as LE
+    for attr in attrs:
         buf += struct.pack("<I", attr)
     return buf
 
@@ -84,10 +90,19 @@ def make_keyformat() -> bytes:
 def make_rendition_key(appearance: int = 0, unknown13: int = 0,
                        element: int = 0, part: int = 0, size: int = 0,
                        identifier: int = 0, dim1: int = 0, dim2: int = 0,
-                       layer: int = 0, scale: int = 0) -> bytes:
-    """Build a 20-byte rendition key (10 uint16 values)."""
-    return struct.pack("<10H", appearance, unknown13, element, part, size,
-                       identifier, dim1, dim2, layer, scale)
+                       layer: int = 0, scale: int = 0,
+                       has_icon: bool = True) -> bytes:
+    """Build a rendition key.
+
+    With icon: 20 bytes (10 uint16) including Dimension2.
+    Without icon: 18 bytes (9 uint16) excluding Dimension2.
+    """
+    if has_icon:
+        return struct.pack("<10H", appearance, unknown13, element, part, size,
+                           identifier, dim1, dim2, layer, scale)
+    else:
+        return struct.pack("<9H", appearance, unknown13, element, part, size,
+                           identifier, dim1, layer, scale)
 
 
 def make_facetkey_value(element: int, part: int, identifier: int) -> bytes:
@@ -266,6 +281,8 @@ class Rendition:
     is_template: bool = False
     colorspace_id: int = 1
 
+    has_icon: bool = True
+
     def build_rendition_key(self) -> bytes:
         return make_rendition_key(
             appearance=self.appearance,
@@ -275,6 +292,7 @@ class Rendition:
             dim1=self.dim1,
             dim2=self.dim2,
             scale=self.scale,
+            has_icon=self.has_icon,
         )
 
     def build_csi(self) -> bytes:
