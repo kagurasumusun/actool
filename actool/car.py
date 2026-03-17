@@ -1,0 +1,363 @@
+"""
+CAR (Core Asset Repository) format structures.
+
+CAR files use a BOM container with specific named blocks for
+asset catalog data. All CAR-internal structures use little-endian byte order.
+"""
+
+import struct
+import uuid
+import zlib
+from dataclasses import dataclass, field
+
+try:
+    import liblzfse as lzfse
+    HAS_LZFSE = True
+except ImportError:
+    HAS_LZFSE = False
+
+
+# Rendition attribute types (key format tokens)
+KEYFORMAT_ATTRS = [7, 13, 1, 2, 3, 17, 8, 9, 11, 12]
+# 7=ThemeAppearance, 13=Unknown13, 1=Element, 2=Part, 3=Size,
+# 17=Identifier, 8=Dimension1, 9=Dimension2, 11=Layer, 12=Scale
+
+ELEMENT_UNIVERSAL = 85  # 0x55
+PART_ICON = 220  # 0xDC - app icon part
+PART_ICON_MULTISIZE = 218  # 0xDA - multisize image descriptor
+PART_REGULAR = 181  # 0xB5
+
+LAYOUT_ONE_PART_SCALE = 12
+LAYOUT_PACKED_IMAGE = 1003
+LAYOUT_NAME_LIST = 1004  # PackedAsset
+LAYOUT_COLOR = 1009
+LAYOUT_MULTISIZE_IMAGE = 1010
+
+
+def make_carheader(rendition_count: int) -> bytes:
+    """Build a CARHEADER block."""
+    buf = bytearray(436)
+    buf[0:4] = b"RATC"  # 'CTAR' as LE uint32
+    struct.pack_into("<I", buf, 4, 972)  # coreuiVersion
+    struct.pack_into("<I", buf, 8, 17)  # storageVersion
+    struct.pack_into("<I", buf, 12, 0)  # storageTimestamp
+    struct.pack_into("<I", buf, 16, rendition_count)
+    # mainVersionString (128 bytes at offset 20)
+    main_ver = b"@(#)PROGRAM:CoreUI  PROJECT:CoreUI-972.1\n"
+    buf[20:20 + len(main_ver)] = main_ver
+    # versionString (256 bytes at offset 148)
+    ver_str = b"IBCocoaTouchImageCatalogTool-17.0\n"
+    buf[148:148 + len(ver_str)] = ver_str
+    # uuid (16 bytes at offset 404) - all zeros
+    # associatedChecksum (4 bytes at offset 420) - 0
+    struct.pack_into("<I", buf, 424, 2)  # schemaVersion
+    struct.pack_into("<I", buf, 428, 1)  # colorSpaceID (sRGB)
+    struct.pack_into("<I", buf, 432, 1)  # keySemantics
+    return bytes(buf)
+
+
+def make_extended_metadata(platform: str, min_deploy: str) -> bytes:
+    """Build an EXTENDED_METADATA block."""
+    buf = bytearray(1028)
+    buf[0:4] = b"META"  # Tag stored as literal bytes
+    # thinningArguments (256 bytes at offset 4) - empty
+    # deploymentPlatformVersion (256 bytes at offset 260)
+    deploy_ver = min_deploy.encode("ascii")
+    buf[260:260 + len(deploy_ver)] = deploy_ver
+    # deploymentPlatform (256 bytes at offset 516)
+    plat = platform.encode("ascii")
+    buf[516:516 + len(plat)] = plat
+    # authoringTool (256 bytes at offset 772)
+    tool = b"actool"
+    buf[772:772 + len(tool)] = tool
+    return bytes(buf)
+
+
+def make_keyformat() -> bytes:
+    """Build a KEYFORMAT block."""
+    buf = b"tmfk" + struct.pack("<II", 0, len(KEYFORMAT_ATTRS))  # 'kfmt' as LE
+    for attr in KEYFORMAT_ATTRS:
+        buf += struct.pack("<I", attr)
+    return buf
+
+
+def make_rendition_key(appearance: int = 0, unknown13: int = 0,
+                       element: int = 0, part: int = 0, size: int = 0,
+                       identifier: int = 0, dim1: int = 0, dim2: int = 0,
+                       layer: int = 0, scale: int = 0) -> bytes:
+    """Build a 20-byte rendition key (10 uint16 values)."""
+    return struct.pack("<10H", appearance, unknown13, element, part, size,
+                       identifier, dim1, dim2, layer, scale)
+
+
+def make_facetkey_value(element: int, part: int, identifier: int) -> bytes:
+    """Build a renditionkeytoken value for FACETKEYS."""
+    # cursorHotSpot (4 bytes) + numberOfAttributes (2 bytes) + attributes
+    attrs = [(1, element), (2, part), (17, identifier)]
+    buf = struct.pack("<HHH", 0, 0, len(attrs))
+    for name, val in attrs:
+        buf += struct.pack("<HH", name, val)
+    return buf
+
+
+def compress_data(pixel_data: bytes, pixel_format: bytes,
+                  width: int, height: int) -> bytes:
+    """Compress pixel data and return the rendition payload (CELM block)."""
+    if HAS_LZFSE and len(pixel_data) > 256:
+        compressed = lzfse.compress(pixel_data)
+        if len(compressed) < len(pixel_data):
+            # CELM with lzfse compression (type 4)
+            celm = struct.pack("<4sIII", b"MLEC", 1, 4, len(compressed))
+            return celm + compressed
+    # Fall back to uncompressed CELM
+    celm = struct.pack("<4sIII", b"MLEC", 1, 0, len(pixel_data))
+    return celm + pixel_data
+
+
+def make_csi_header(width: int, height: int, scale_factor: int,
+                    pixel_format: bytes, layout: int, name: str,
+                    rendition_flags: int = 0, colorspace_id: int = 1) -> bytes:
+    """Build a CSI header (184 bytes)."""
+    buf = bytearray(184)
+    buf[0:4] = b"ISTC"  # 'CTSI' as LE uint32
+    struct.pack_into("<I", buf, 4, 1)  # version
+    struct.pack_into("<I", buf, 8, rendition_flags)
+    struct.pack_into("<I", buf, 12, width)
+    struct.pack_into("<I", buf, 16, height)
+    struct.pack_into("<I", buf, 20, scale_factor)
+    buf[24:28] = pixel_format
+    struct.pack_into("<I", buf, 28, colorspace_id & 0xF)
+    # csimetadata
+    struct.pack_into("<I", buf, 32, 0)  # modtime
+    struct.pack_into("<H", buf, 36, layout)
+    struct.pack_into("<H", buf, 38, 0)  # zero
+    # name (128 bytes at offset 40)
+    name_bytes = name.encode("ascii")[:127]
+    buf[40:40 + len(name_bytes)] = name_bytes
+    # csibitmaplist fields are set later
+    return bytes(buf)
+
+
+def build_csi(width: int, height: int, scale_factor: int,
+              pixel_format: bytes, layout: int, name: str,
+              tlv_data: bytes = b"", rendition_data: bytes = b"",
+              rendition_flags: int = 0, colorspace_id: int = 1,
+              bitmaplist_unknown: int = 0) -> bytes:
+    """Build a complete CSI block (header + TLV + rendition data)."""
+    header = bytearray(make_csi_header(width, height, scale_factor,
+                                        pixel_format, layout, name,
+                                        rendition_flags, colorspace_id))
+    # Fill in csibitmaplist
+    struct.pack_into("<I", header, 168, len(tlv_data))  # tvlLength
+    struct.pack_into("<I", header, 172, bitmaplist_unknown)  # unknown
+    struct.pack_into("<I", header, 176, 0)  # zero
+    struct.pack_into("<I", header, 180, len(rendition_data))  # renditionLength
+    return bytes(header) + tlv_data + rendition_data
+
+
+def make_slices_tlv(width: int, height: int) -> bytes:
+    """Build a Slices TLV entry."""
+    # tag(4) + length(4) + data
+    slice_data = struct.pack("<IIIII", 1, 0, 0, width, height)
+    return struct.pack("<II", 0x03E9, len(slice_data)) + slice_data
+
+
+def make_metrics_tlv(width: int, height: int) -> bytes:
+    """Build a Metrics TLV entry."""
+    metrics_data = struct.pack("<IIIIIII", 1, 0, 0, 0, 0, width, height)
+    return struct.pack("<II", 0x03EB, len(metrics_data)) + metrics_data
+
+
+def make_blend_opacity_tlv() -> bytes:
+    """Build a BlendModeAndOpacity TLV (default: normal blend, opacity=1.0)."""
+    blend_data = struct.pack("<If", 0, 1.0)
+    return struct.pack("<II", 0x03EC, len(blend_data)) + blend_data
+
+
+def make_exif_orientation_tlv(orientation: int = 1) -> bytes:
+    """Build an EXIFOrientation TLV."""
+    data = struct.pack("<I", orientation)
+    return struct.pack("<II", 0x03EE, len(data)) + data
+
+
+def make_inlk_tlv(x: int, y: int, width: int, height: int,
+                   pixel_format: bytes, scale: int) -> bytes:
+    """Build an INLK TLV (0x03f2) for packed image references."""
+    # KLNI tag + version + x + y + w + h
+    inlk = struct.pack("<4sI", b"KLNI", 0)
+    inlk += struct.pack("<IIII", x, y, width, height)
+    # Trailing: stride info + key attributes for the packed asset
+    bpp = 4 if pixel_format == b"BGRA" else 2
+    stride = width * bpp
+    # Stride info (2 uint16s)
+    inlk += struct.pack("<HH", stride, 0)
+    # Rendition key attributes: element=9, part=181, scale
+    inlk += struct.pack("<HH", 0, 0)  # padding/unknown
+    inlk += struct.pack("<HH", 1, 9)  # Element = 9 (packed asset)
+    inlk += struct.pack("<HH", 2, PART_REGULAR)  # Part = 181
+    inlk += struct.pack("<HH", 12, scale)  # Scale
+    inlk += struct.pack("<HH", 0, 0)  # terminator
+    return struct.pack("<II", 0x03F2, len(inlk)) + inlk
+
+
+def build_packed_image_csi(name: str, width: int, height: int,
+                           scale: int, pixel_format: bytes,
+                           x: int, y: int) -> bytes:
+    """Build a CSI for a packed image reference (layout 1003)."""
+    scale_factor = scale * 100
+
+    # TLV section
+    tlv = make_slices_tlv(width, height)
+    tlv += make_metrics_tlv(width, height)
+    tlv += make_inlk_tlv(x, y, width, height, pixel_format, scale)
+    tlv += make_blend_opacity_tlv()
+    tlv += make_exif_orientation_tlv()
+
+    return build_csi(
+        width=width, height=height, scale_factor=scale_factor,
+        pixel_format=pixel_format, layout=LAYOUT_PACKED_IMAGE,
+        name=name, tlv_data=tlv, rendition_data=b"",
+        colorspace_id=1, bitmaplist_unknown=1,
+    )
+
+
+def build_packed_asset_csi(name: str, width: int, height: int,
+                           scale: int, pixel_format: bytes,
+                           pixel_data: bytes) -> bytes:
+    """Build a CSI for a packed asset atlas (layout 1004)."""
+    scale_factor = scale * 100
+
+    # TLV section
+    tlv = make_slices_tlv(width, height)
+    tlv += make_metrics_tlv(width, height)
+    tlv += make_blend_opacity_tlv()
+    tlv += make_exif_orientation_tlv()
+
+    # Compress the atlas pixel data
+    rend_data = compress_data(pixel_data, pixel_format, width, height)
+
+    return build_csi(
+        width=width, height=height, scale_factor=scale_factor,
+        pixel_format=pixel_format, layout=LAYOUT_NAME_LIST,
+        name=name, tlv_data=tlv, rendition_data=rend_data,
+        colorspace_id=1, bitmaplist_unknown=1,
+    )
+
+
+ELEMENT_PACKED = 9  # Element for packed assets
+
+
+@dataclass
+class Rendition:
+    """A single rendition (image/asset) in the CAR file."""
+    name: str
+    identifier: int
+    element: int = ELEMENT_UNIVERSAL
+    part: int = PART_REGULAR
+    scale: int = 1
+    width: int = 0
+    height: int = 0
+    pixel_data: bytes = b""
+    pixel_format: bytes = b"BGRA"
+    layout: int = LAYOUT_ONE_PART_SCALE
+    dim1: int = 0
+    dim2: int = 0
+    appearance: int = 0
+    is_template: bool = False
+    colorspace_id: int = 1
+
+    def build_rendition_key(self) -> bytes:
+        return make_rendition_key(
+            appearance=self.appearance,
+            element=self.element,
+            part=self.part,
+            identifier=self.identifier,
+            dim1=self.dim1,
+            dim2=self.dim2,
+            scale=self.scale,
+        )
+
+    def build_csi(self) -> bytes:
+        """Build the complete CSI data for this rendition."""
+        scale_factor = self.scale * 100
+
+        # Build TLV section
+        tlv = b""
+        if self.layout == LAYOUT_ONE_PART_SCALE:
+            tlv += make_slices_tlv(self.width, self.height)
+            tlv += make_metrics_tlv(self.width, self.height)
+            tlv += make_blend_opacity_tlv()
+            tlv += make_exif_orientation_tlv()
+
+        # Build rendition data
+        rend_data = b""
+        if self.pixel_data:
+            rend_data = compress_data(self.pixel_data, self.pixel_format,
+                                      self.width, self.height)
+
+        flags = 0
+        if self.is_template:
+            flags |= (1 << 1)  # isVectorBased used for template? Actually no.
+            # Template rendering is handled by the facet, not flags.
+
+        return build_csi(
+            width=self.width,
+            height=self.height,
+            scale_factor=scale_factor,
+            pixel_format=self.pixel_format,
+            layout=self.layout,
+            name=self.name,
+            tlv_data=tlv,
+            rendition_data=rend_data,
+            rendition_flags=flags,
+            colorspace_id=self.colorspace_id,
+            bitmaplist_unknown=1 if self.pixel_data else 0,
+        )
+
+
+@dataclass
+class MultisizeImageEntry:
+    """Entry in a multisize image rendition."""
+    width: int
+    height: int
+    index: int  # dim2 index
+
+
+def build_multisize_rendition(name: str, identifier: int,
+                              entries: list[MultisizeImageEntry]) -> Rendition:
+    """Build a multisize image rendition (layout 1010) for app icons."""
+    # The rendition data contains a MSIS (MultisizeImage) structure
+    # MSIS: tag(4) + version(4) + count(4) + entries[count]
+    # Each entry: unknown(4) + width(2) + height(2) + index(2) + padding(2)
+    msis_entries = b""
+    for e in entries:
+        msis_entries += struct.pack("<III", e.width, e.height, e.index)
+    msis_data = struct.pack("<4sII", b"SISM", 1, len(entries)) + msis_entries
+
+    # TLV for multisize: just blend/opacity
+    tlv = make_blend_opacity_tlv()
+    tlv += make_exif_orientation_tlv()
+
+    rend = Rendition(
+        name=name,
+        identifier=identifier,
+        element=ELEMENT_UNIVERSAL,
+        part=PART_ICON_MULTISIZE,
+        scale=1,
+        width=0,
+        height=0,
+        layout=LAYOUT_MULTISIZE_IMAGE,
+        pixel_format=b"\x00\x00\x00\x00",
+        colorspace_id=0,
+    )
+    # Override the CSI build
+    rend._csi_override = build_csi(
+        width=0, height=0, scale_factor=0,
+        pixel_format=b"\x00\x00\x00\x00",
+        layout=LAYOUT_MULTISIZE_IMAGE,
+        name=name,
+        tlv_data=tlv,
+        rendition_data=msis_data,
+        colorspace_id=0,
+    )
+    return rend
