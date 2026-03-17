@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "actool"
+version = "1.0.0"
+description = "Open reimplementation of Apple's actool for compiling xcassets"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "pillow",
+    "pyliblzfse",
+]
+
+[tool.setuptools.packages.find]
+include = ["actool*"]
+
+[project.scripts]
+actool = "actool.__main__:main"

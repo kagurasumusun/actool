@@ -4,6 +4,7 @@ actool_client.py
 CARParser
 __pycache__
 .venv
+*.egg-info
 
 # Deciduous database (local)
 .deciduous/
