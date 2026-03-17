@@ -17,10 +17,22 @@ from .packer import PackedImage, Atlas, pack_images, group_for_packing
 
 def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
                     min_deploy: str, app_icon: str = None,
-                    info_plist_path: str = None):
+                    info_plist_path: str = None,
+                    accent_color: str = None,
+                    widget_background_color: str = None,
+                    standalone_icon_behavior: str = "default",
+                    warnings_list: list = None,
+                    errors_list: list = None,
+                    notices_list: list = None):
     """Compile an xcassets catalog into output files."""
     os.makedirs(output_dir, exist_ok=True)
     has_icon = app_icon is not None
+    if warnings_list is None:
+        warnings_list = []
+    if errors_list is None:
+        errors_list = []
+    if notices_list is None:
+        notices_list = []
 
     # Select keyformat based on whether we have an app icon
     if has_icon:
@@ -155,21 +167,23 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
     bom.write(car_path)
 
     # Generate ICNS file if app icon is specified
-    if app_icon:
+    if app_icon and standalone_icon_behavior != "none":
         icon_images = catalog.get_icon_images()
         if icon_images:
             icns_path = os.path.join(output_dir, f"{app_icon}.icns")
             create_icns(icon_images, icns_path)
 
     # Generate partial info plist
-    if info_plist_path and app_icon:
-        _write_info_plist(info_plist_path, app_icon)
+    if info_plist_path:
+        _write_info_plist(info_plist_path, app_icon=app_icon,
+                          accent_color=accent_color,
+                          widget_background_color=widget_background_color)
 
     # Print compilation results
     output_files = []
     if info_plist_path:
         output_files.append(os.path.abspath(info_plist_path))
-    if app_icon:
+    if app_icon and standalone_icon_behavior != "none":
         icns_path = os.path.join(output_dir, f"{app_icon}.icns")
         if os.path.exists(icns_path):
             output_files.append(os.path.abspath(icns_path))
@@ -192,22 +206,41 @@ def _make_bitmap_info(identifier: int,
     return buf
 
 
-def _write_info_plist(path: str, app_icon: str):
+def _write_info_plist(path: str, app_icon: str = None,
+                      accent_color: str = None,
+                      widget_background_color: str = None):
     """Write the partial info plist."""
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    plist = f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-\t<key>CFBundleIconFile</key>
-\t<string>{app_icon}</string>
-\t<key>CFBundleIconName</key>
-\t<string>{app_icon}</string>
-</dict>
-</plist>
-"""
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    entries = []
+    if app_icon:
+        entries.append(("\t<key>CFBundleIconFile</key>",
+                        f"\t<string>{app_icon}</string>"))
+        entries.append(("\t<key>CFBundleIconName</key>",
+                        f"\t<string>{app_icon}</string>"))
+    if accent_color:
+        entries.append(("\t<key>NSAccentColorName</key>",
+                        f"\t<string>{accent_color}</string>"))
+    if widget_background_color:
+        entries.append(("\t<key>NSWidgetBackgroundColorName</key>",
+                        f"\t<string>{widget_background_color}</string>"))
+
+    lines = ['<?xml version="1.0" encoding="UTF-8"?>',
+             '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+             '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+             '<plist version="1.0">',
+             '<dict>']
+    for key_line, val_line in entries:
+        lines.append(key_line)
+        lines.append(val_line)
+    lines.append('</dict>')
+    lines.append('</plist>')
+    lines.append('')
+
     with open(path, "w") as f:
-        f.write(plist)
+        f.write("\n".join(lines))
 
 
 def _print_compilation_results(output_files: list[str]):
