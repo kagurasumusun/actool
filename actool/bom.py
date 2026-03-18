@@ -68,13 +68,19 @@ class BOMWriter:
             return tree_idx
 
         # Multiple leaf nodes - need internal node(s)
-        # For simplicity, build a single-level tree with one internal node
+        # Two-pass: reserve block indices first, then build with correct links
         leaf_indices = []
+        for batch in leaf_nodes:
+            # Reserve a block index with placeholder data
+            leaf_indices.append(self.add_block(b"\x00"))
+
+        # Now build each leaf with correct forward/backward links
         for i, batch in enumerate(leaf_nodes):
-            fwd = 0  # Will be set after we know all indices
-            bwd = 0
+            fwd = leaf_indices[i + 1] if i + 1 < len(leaf_indices) else 0
+            bwd = leaf_indices[i - 1] if i > 0 else 0
             node_data = self._build_leaf_node(batch, fwd, bwd)
-            leaf_indices.append(self.add_block(node_data))
+            # Replace the placeholder block
+            self._blocks[leaf_indices[i]] = node_data
 
         # Build internal node
         # Internal node format: isLeaf(2) + count(2) + forward(4) + backward(4)

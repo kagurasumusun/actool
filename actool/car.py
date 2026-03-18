@@ -27,6 +27,7 @@ KEYFORMAT_ATTRS_NO_ICON = [7, 13, 1, 2, 3, 17, 8, 11, 12]
 KEYFORMAT_ATTRS = KEYFORMAT_ATTRS_ICON  # Default (backward compat)
 
 ELEMENT_UNIVERSAL = 85  # 0x55
+ELEMENT_PACKED = 9  # Element for packed assets
 PART_ICON = 220  # 0xDC - app icon part
 PART_ICON_MULTISIZE = 218  # 0xDA - multisize image descriptor
 PART_REGULAR = 181  # 0xB5
@@ -232,10 +233,8 @@ def make_inlk_tlv(x: int, y: int, width: int, height: int,
     attr_data += struct.pack("<HH", 12, scale)  # Scale
     if atlas_identifier:
         attr_data += struct.pack("<HH", 17, atlas_identifier)  # Identifier
-    # Header: stride-like value + attr data length
-    bpp = 4 if pixel_format == b"BGRA" else 2
-    stride_val = width * bpp
-    inlk += struct.pack("<HH", stride_val & 0xFFFF, len(attr_data))
+    # Header: constant (12) + attr data byte count
+    inlk += struct.pack("<HH", 12, len(attr_data))
     inlk += attr_data
     inlk += struct.pack("<HH", 0, 0)  # terminator
     return struct.pack("<II", 0x03F2, len(inlk)) + inlk
@@ -287,9 +286,6 @@ def build_packed_asset_csi(name: str, width: int, height: int,
     )
 
 
-ELEMENT_PACKED = 9  # Element for packed assets
-
-
 def build_color_csi(name: str, red: float, green: float, blue: float,
                     alpha: float, colorspace_id: int = 0) -> bytes:
     """Build a CSI for a color rendition (layout 1009)."""
@@ -328,7 +324,7 @@ def build_sprite_atlas_metadata_csi(name: str) -> bytes:
 def build_data_csi(name: str, raw_data: bytes) -> bytes:
     """Build a CSI for a raw data rendition (layout 1000)."""
     # RAWD header
-    rawd = struct.pack("<4sII", b"DWAR", 1, len(raw_data))
+    rawd = struct.pack("<4sII", b"DWAR", 0, len(raw_data))
     rawd += raw_data
 
     tlv = make_blend_opacity_tlv()
