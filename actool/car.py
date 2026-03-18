@@ -195,6 +195,14 @@ def make_exif_orientation_tlv(orientation: int = 1) -> bytes:
     return struct.pack("<II", 0x03EE, len(data)) + data
 
 
+def make_bytes_per_row_tlv(width: int, pixel_format: bytes) -> bytes:
+    """Build a BytesPerRow TLV (0x03EF)."""
+    bpp = 4 if pixel_format == b"BGRA" else 2
+    bpr = width * bpp
+    data = struct.pack("<I", bpr)
+    return struct.pack("<II", 0x03EF, len(data)) + data
+
+
 def make_inlk_tlv(x: int, y: int, width: int, height: int,
                    pixel_format: bytes, scale: int) -> bytes:
     """Build an INLK TLV (0x03f2) for packed image references."""
@@ -242,11 +250,11 @@ def build_packed_asset_csi(name: str, width: int, height: int,
     """Build a CSI for a packed asset atlas (layout 1004)."""
     scale_factor = scale * 100
 
-    # TLV section
+    # TLV section (packed assets: slices + blend + exif + bytes_per_row, NO metrics)
     tlv = make_slices_tlv(width, height)
-    tlv += make_metrics_tlv(width, height)
     tlv += make_blend_opacity_tlv()
     tlv += make_exif_orientation_tlv()
+    tlv += make_bytes_per_row_tlv(width, pixel_format)
 
     # Compress the atlas pixel data
     rend_data = compress_data(pixel_data, pixel_format, width, height)
@@ -317,6 +325,8 @@ class Rendition:
             tlv += make_metrics_tlv(self.width, self.height)
             tlv += make_blend_opacity_tlv()
             tlv += make_exif_orientation_tlv()
+            if self.pixel_data:
+                tlv += make_bytes_per_row_tlv(self.width, self.pixel_format)
 
         # Build rendition data
         rend_data = b""
