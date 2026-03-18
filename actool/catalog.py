@@ -52,8 +52,12 @@ def load_image_as_bgra(path: str) -> tuple[bytes, int, int, bytes]:
     img = Image.open(path)
 
     if img.mode == "RGBA":
-        # Convert RGBA to BGRA
         r, g, b, a = img.split()
+        # Detect grayscale-compatible RGBA (R==G==B) → store as GA8
+        if r.tobytes() == g.tobytes() == b.tobytes():
+            ga = Image.merge("LA", (r, a))
+            return ga.tobytes(), img.width, img.height, b" 8AG"
+        # Convert RGBA to BGRA
         img = Image.merge("RGBA", (b, g, r, a))
         pixel_data = img.tobytes()
         return pixel_data, img.width, img.height, b"BGRA"
