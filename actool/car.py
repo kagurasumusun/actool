@@ -18,13 +18,19 @@ except ImportError:
 
 
 # Rendition attribute types (key format tokens)
-# With app icon: includes Dimension2 (token 9) for icon size indices
-KEYFORMAT_ATTRS_ICON = [7, 13, 1, 2, 3, 17, 8, 9, 11, 12]
-# Without app icon: no Dimension2
-KEYFORMAT_ATTRS_NO_ICON = [7, 13, 1, 2, 3, 17, 8, 11, 12]
 # 7=ThemeAppearance, 13=Unknown13, 1=Element, 2=Part, 3=Size,
 # 17=Identifier, 8=Dimension1, 9=Dimension2, 11=Layer, 12=Scale
-KEYFORMAT_ATTRS = KEYFORMAT_ATTRS_ICON  # Default (backward compat)
+#
+# Base tokens always included:
+KEYFORMAT_BASE = [7, 13, 1, 2, 3, 17, 11, 12]
+# Optional tokens included only when used by any rendition:
+KEYFORMAT_OPTIONAL = {8, 9}  # Dim1, Dim2
+# Full ordered list (insertion position matters for key construction):
+KEYFORMAT_ALL = [7, 13, 1, 2, 3, 17, 8, 9, 11, 12]
+# Legacy aliases
+KEYFORMAT_ATTRS_ICON = KEYFORMAT_ALL
+KEYFORMAT_ATTRS_NO_ICON = [7, 13, 1, 2, 3, 17, 8, 11, 12]
+KEYFORMAT_ATTRS = KEYFORMAT_ALL
 
 ELEMENT_UNIVERSAL = 85  # 0x55
 ELEMENT_PACKED = 9  # Element for packed assets
@@ -44,6 +50,27 @@ LAYOUT_MULTISIZE_IMAGE = 1010
 
 # Pixel format for raw data
 PIXELFMT_DATA = b"ATAD"  # 'DATA' as LE uint32
+
+
+def compute_keyformat(renditions, force_dim1: bool = False) -> list[int]:
+    """Compute the dynamic KEYFORMAT based on which attributes are used.
+
+    Only includes optional tokens (Dim1, Dim2) if any rendition uses
+    a non-zero value for them. force_dim1 includes Dim1 even if no
+    rendition explicitly uses it (needed when packed assets will use it).
+    """
+    used_dim1 = force_dim1 or any(r.dim1 != 0 for r in renditions)
+    used_dim2 = any(r.dim2 != 0 for r in renditions)
+
+    tokens = []
+    for t in KEYFORMAT_ALL:
+        if t in KEYFORMAT_OPTIONAL:
+            if t == 8 and not used_dim1:
+                continue
+            if t == 9 and not used_dim2:
+                continue
+        tokens.append(t)
+    return tokens
 
 
 def make_carheader(rendition_count: int) -> bytes:
@@ -99,12 +126,17 @@ def make_rendition_key(appearance: int = 0, unknown13: int = 0,
                        element: int = 0, part: int = 0, size: int = 0,
                        identifier: int = 0, dim1: int = 0, dim2: int = 0,
                        layer: int = 0, scale: int = 0,
+                       keyformat: list[int] = None,
                        has_icon: bool = True) -> bytes:
-    """Build a rendition key.
-
-    With icon: 20 bytes (10 uint16) including Dimension2.
-    Without icon: 18 bytes (9 uint16) excluding Dimension2.
-    """
+    """Build a rendition key matching the given keyformat tokens."""
+    attr_values = {
+        7: appearance, 13: unknown13, 1: element, 2: part, 3: size,
+        17: identifier, 8: dim1, 9: dim2, 11: layer, 12: scale,
+    }
+    if keyformat is not None:
+        vals = [attr_values.get(t, 0) for t in keyformat]
+        return struct.pack(f"<{len(vals)}H", *vals)
+    # Legacy fallback
     if has_icon:
         return struct.pack("<10H", appearance, unknown13, element, part, size,
                            identifier, dim1, dim2, layer, scale)
@@ -380,6 +412,7 @@ class Rendition:
     sprite_atlas_id: int = 0  # Non-zero = belongs to a sprite atlas
 
     has_icon: bool = True
+    keyformat: list[int] = None  # Dynamic keyformat tokens
 
     def build_rendition_key(self) -> bytes:
         locale_id = _hash_name(self.locale) if self.locale else 0
@@ -392,6 +425,7 @@ class Rendition:
             dim1=self.dim1,
             dim2=self.dim2,
             scale=self.scale,
+            keyformat=self.keyformat,
             has_icon=self.has_icon,
         )
 

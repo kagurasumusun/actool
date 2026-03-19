@@ -37,24 +37,24 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
     if notices_list is None:
         notices_list = []
 
-    # Select keyformat based on whether we have an app icon
-    if has_icon:
-        keyformat_attrs = car.KEYFORMAT_ATTRS_ICON
-    else:
-        keyformat_attrs = car.KEYFORMAT_ATTRS_NO_ICON
-
     # Parse the asset catalog
     catalog = AssetCatalog(xcassets_path, platform, min_deploy, app_icon,
                            include_languages=include_languages,
                            development_region=development_region)
     renditions, facets = catalog.parse()
 
-    # Set has_icon on all renditions for correct key building
-    for rend in renditions:
-        rend.has_icon = has_icon
-
     # Group renditions for atlas packing
     pack_groups, inline_renditions = group_for_packing(renditions)
+
+    # Compute dynamic keyformat: include dim1 if packing produces multiple groups
+    # (packed assets use dim1_counter as dim1 values)
+    uses_dim1 = len(pack_groups) > 1
+    keyformat_attrs = car.compute_keyformat(renditions, force_dim1=uses_dim1)
+
+    # Set keyformat on all renditions for correct key building
+    for rend in renditions:
+        rend.has_icon = has_icon
+        rend.keyformat = keyformat_attrs
 
     # Build atlas textures and their references
     all_rendition_entries = []
@@ -96,7 +96,7 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
                 identifier=sprite_atlas_id,
                 dim1=dim1_counter,
                 scale=scale,
-                has_icon=has_icon,
+                keyformat=keyformat_attrs,
             )
         else:
             atlas_name = atlas.name
@@ -105,7 +105,7 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
                 part=car.PART_REGULAR,
                 dim1=dim1_counter,
                 scale=scale,
-                has_icon=has_icon,
+                keyformat=keyformat_attrs,
             )
 
         atlas_csi = car.build_packed_asset_csi(
@@ -126,7 +126,7 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
                 identifier=img.identifier,
                 dim2=img.dim2,
                 scale=scale,
-                has_icon=has_icon,
+                keyformat=keyformat_attrs,
             )
             ref_csi = car.build_packed_image_csi(
                 name=img.name,
@@ -160,7 +160,7 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
             element=car.ELEMENT_PACKED,
             part=car.PART_SPRITE_ATLAS,
             identifier=atlas_id, scale=1,
-            has_icon=has_icon,
+            keyformat=keyformat_attrs,
         )
         if not any(k == meta_key for k, _ in all_rendition_entries):
             meta_csi = car.build_sprite_atlas_metadata_csi(
@@ -206,11 +206,10 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
     # Build RENDITIONS tree
     bom.add_tree("RENDITIONS", all_rendition_entries)
 
-    # Build BITMAPKEYS tree
-    # BITMAPKEYS uses a non-standard BOM tree format where keys are raw
-    # identifier values (not block references). We write an empty tree
-    # since the data is not required for CoreUI to read the CAR.
-    bom.add_tree("BITMAPKEYS", [])
+    # Build BITMAPKEYS tree (raw identifier keys, not block refs)
+    bitmapkey_entries = _build_bitmapkeys(
+        facets, all_rendition_entries, keyformat_attrs, has_icon)
+    bom.add_raw_key_tree("BITMAPKEYS", bitmapkey_entries)
 
     # Write the CAR file
     car_path = os.path.join(output_dir, "Assets.car")
@@ -243,6 +242,64 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
         output_files.append(os.path.abspath(info_plist_path))
 
     return output_files
+
+
+def _build_bitmapkeys(facets, rendition_entries, keyformat_attrs, has_icon):
+    """Build BITMAPKEYS entries from facets and rendition entries.
+
+    Returns list of (identifier_uint32, value_bytes) sorted by identifier.
+    Each value is a 56-byte block with attribute bitmasks showing which
+    attribute values are used across renditions of each facet.
+    """
+    # Wildcard attrs: element, part, identifier (constant per facet)
+    wildcard_attrs = {1, 2, 17}  # Element, Part, Identifier
+
+    # Group rendition keys by identifier
+    id_keys: dict[int, list[list[int]]] = {}
+    for key_data, _csi in rendition_entries:
+        n_vals = len(key_data) // 2
+        vals = struct.unpack(f"<{n_vals}H", key_data)
+        # Find identifier (attr 17) position in keyformat
+        id_pos = keyformat_attrs.index(17) if 17 in keyformat_attrs else -1
+        if id_pos >= 0 and id_pos < len(vals):
+            ident = vals[id_pos]
+            if ident not in id_keys:
+                id_keys[ident] = []
+            id_keys[ident].append(list(vals))
+
+    entries = []
+    for name, (elem, part, ident) in sorted(facets.items(), key=lambda x: x[1][2]):
+        if ident == 0:
+            continue  # Skip packed asset entries (id=0)
+
+        # Compute bitmasks for each attribute
+        attr_masks = []
+        keys_for_id = id_keys.get(ident, [])
+
+        for i, attr_id in enumerate(keyformat_attrs):
+            if attr_id in wildcard_attrs:
+                attr_masks.append(0xFFFFFFFF)
+            else:
+                bitmask = 0
+                for key_vals in keys_for_id:
+                    if i < len(key_vals):
+                        v = key_vals[i]
+                        if v < 32:
+                            bitmask |= (1 << v)
+                attr_masks.append(bitmask if bitmask else 1)
+
+        # Build value block: version(4) + unknown(4) + data_size(4) +
+        # n_attrs(4) + attrs[n_attrs](4 each)
+        n_attrs = len(keyformat_attrs)
+        data_size = 4 + n_attrs * 4  # n_attrs field + attr values
+        value = struct.pack("<III", 1, 0, data_size)
+        value += struct.pack("<I", n_attrs)
+        for mask in attr_masks:
+            value += struct.pack("<I", mask)
+
+        entries.append((ident, value))
+
+    return entries
 
 
 def _make_bitmap_info(identifier: int,

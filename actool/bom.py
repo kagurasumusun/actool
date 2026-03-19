@@ -45,8 +45,8 @@ class BOMWriter:
             # Empty tree - single empty leaf node
             node_data = struct.pack(">HHiI", 1, 0, 0, 0)
             node_idx = self.add_block(node_data)
-            tree_header = struct.pack(">4sIIIIB", b"tree", 1, node_idx,
-                                      block_size, 0, 0)
+            tree_header = struct.pack(">4sIIIIBII", b"tree", 1, node_idx,
+                                      block_size, 0, 0, 0, 0)
             tree_idx = self.add_block(tree_header)
             self._named_blocks[name] = tree_idx
             return tree_idx
@@ -61,8 +61,8 @@ class BOMWriter:
             # Single leaf node - simple case
             node_data = self._build_leaf_node(leaf_nodes[0], 0, 0)
             node_idx = self.add_block(node_data)
-            tree_header = struct.pack(">4sIIIIB", b"tree", 1, node_idx,
-                                      block_size, len(entries), 0)
+            tree_header = struct.pack(">4sIIIIBII", b"tree", 1, node_idx,
+                                      block_size, len(entries), 0, 0, 0)
             tree_idx = self.add_block(tree_header)
             self._named_blocks[name] = tree_idx
             return tree_idx
@@ -94,8 +94,8 @@ class BOMWriter:
             internal += struct.pack(">II", key_idx, leaf_indices[i])
         internal_idx = self.add_block(internal)
 
-        tree_header = struct.pack(">4sIIIIB", b"tree", 1, internal_idx,
-                                  block_size, len(entries), 0)
+        tree_header = struct.pack(">4sIIIIBII", b"tree", 1, internal_idx,
+                                  block_size, len(entries), 0, 0, 0)
         tree_idx = self.add_block(tree_header)
         self._named_blocks[name] = tree_idx
         return tree_idx
@@ -110,28 +110,100 @@ class BOMWriter:
             node += struct.pack(">II", val_idx, key_idx)
         return node
 
+    def add_raw_key_tree(self, name: str,
+                         entries: list[tuple[int, bytes]],
+                         block_size: int = 1024) -> int:
+        """Add a BOM tree where keys are raw uint32 values (not block refs).
+
+        Used for BITMAPKEYS where the key is the facet identifier stored
+        directly as a uint32 in the node entry.
+
+        entries: list of (raw_key_uint32, value_bytes) pairs, sorted by key.
+        """
+        if not entries:
+            return self.add_tree(name, [], block_size)
+
+        # Build leaf node(s)
+        # Entry format: value_block_idx(4) + raw_key(4) = 8 bytes
+        max_per_node = (block_size - 12) // 8
+
+        leaf_batches = []
+        for start in range(0, len(entries), max_per_node):
+            leaf_batches.append(entries[start:start + max_per_node])
+
+        if len(leaf_batches) == 1:
+            node = struct.pack(">HHII", 1, len(entries), 0, 0)
+            for raw_key, value_data in entries:
+                val_idx = self.add_block(value_data)
+                node += struct.pack(">II", val_idx, raw_key)
+            # Pad node to block_size (BOM reader may read full block_size)
+            if len(node) < block_size:
+                node += b"\x00" * (block_size - len(node))
+            node_idx = self.add_block(node)
+            tree_header = struct.pack(">4sIIIIBII", b"tree", 1, node_idx,
+                                      block_size, len(entries), 1, 0, 0)
+            tree_idx = self.add_block(tree_header)
+            self._named_blocks[name] = tree_idx
+            return tree_idx
+
+        # Multiple leaf nodes — same two-pass approach
+        leaf_indices = []
+        for batch in leaf_batches:
+            leaf_indices.append(self.add_block(b"\x00"))
+
+        for i, batch in enumerate(leaf_batches):
+            fwd = leaf_indices[i + 1] if i + 1 < len(leaf_indices) else 0
+            bwd = leaf_indices[i - 1] if i > 0 else 0
+            node = struct.pack(">HHII", 1, len(batch), fwd, bwd)
+            for raw_key, value_data in batch:
+                val_idx = self.add_block(value_data)
+                node += struct.pack(">II", val_idx, raw_key)
+            if len(node) < block_size:
+                node += b"\x00" * (block_size - len(node))
+            self._blocks[leaf_indices[i]] = node
+
+        internal = struct.pack(">HHII", 0, len(leaf_indices) - 1, 0, 0)
+        internal += struct.pack(">I", leaf_indices[0])
+        for i in range(1, len(leaf_indices)):
+            first_key = leaf_batches[i][0][0]
+            internal += struct.pack(">II", first_key, leaf_indices[i])
+        internal_idx = self.add_block(internal)
+
+        tree_header = struct.pack(">4sIIIIBII", b"tree", 1, internal_idx,
+                                  block_size, len(entries), 1, 0, 0)
+        tree_idx = self.add_block(tree_header)
+        self._named_blocks[name] = tree_idx
+        return tree_idx
+
     def write(self, path: str):
         """Write the BOM file to disk."""
+        MIN_TABLE_SIZE = 256  # Apple pre-allocates at least 256 entries
+        FREELIST_SIZE = 20    # 20-byte freelist trailer (all zeros)
+
         # Calculate block offsets
         header_size = 32  # BOMStore header
-        # Start placing blocks after header
         current_offset = header_size
+        num_used_blocks = len(self._blocks)  # Max block index + 1 (includes null block 0)
 
         block_entries = []
         for i, block_data in enumerate(self._blocks):
             if i == 0:
                 block_entries.append((0, 0))
                 continue
-            # Align to 16-byte boundary
             if current_offset % 16 != 0:
                 current_offset += 16 - (current_offset % 16)
             block_entries.append((current_offset, len(block_data)))
             current_offset += len(block_data)
 
-        # Build index (block table)
+        # Pad block table to minimum size with null entries
+        while len(block_entries) < MIN_TABLE_SIZE:
+            block_entries.append((0, 0))
+
+        # Build index (block table + freelist)
         index_data = struct.pack(">I", len(block_entries))
         for offset, length in block_entries:
             index_data += struct.pack(">II", offset, length)
+        index_data += b"\x00" * FREELIST_SIZE  # Empty freelist
 
         # Build vars section
         vars_data = struct.pack(">I", len(self._named_blocks))
@@ -158,7 +230,7 @@ class BOMWriter:
             # Header
             f.write(b"BOMStore")
             f.write(struct.pack(">I", 1))  # version
-            f.write(struct.pack(">I", len(self._blocks)))  # numberOfBlocks
+            f.write(struct.pack(">I", num_used_blocks))  # numberOfBlocks (used only)
             f.write(struct.pack(">I", index_offset))
             f.write(struct.pack(">I", index_length))
             f.write(struct.pack(">I", vars_offset))
