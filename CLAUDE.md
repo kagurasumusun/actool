@@ -241,6 +241,7 @@ auto_detect = true
 
 ```bash
 deciduous check-update    # Update needed? Run 'deciduous update' if yes
+                          # (auto-checked every 24h if auto-update is on)
 deciduous nodes           # What decisions exist?
 deciduous edges           # How are they connected? Any gaps?
 deciduous doc list        # Any attached documents to review?
@@ -264,7 +265,6 @@ deciduous events checkpoint --clear-events
 
 Events auto-emit on add/link/status commands. Git merges event files automatically.
 <!-- deciduous:end -->
-
 The project's purpose is to provide a clean reimplementation of macos's actool. The initial main goal is to provide the basic compilation step. It should be able to run:
 ```
 actool --compile "test_outdir" --platform macosx --minimum-deployment-target "11.0" --app-icon AppIcon --output-partial-info-plist "test_outdir/AppIcon.Info.plist" test/Images.xcassets

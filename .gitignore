@@ -1,10 +1,15 @@
-test
+# Build artifacts
+__pycache__
+*.egg-info
+.venv
+*.pyc
+
+# external files
 actool_server.py
 actool_client.py
-CARParser
-__pycache__
-.venv
-*.egg-info
+
+# Test output (generated at runtime)
+_test_output/
 
 # Deciduous database (local)
 .deciduous/
