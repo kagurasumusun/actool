@@ -271,6 +271,6 @@ actool --compile "test_outdir" --platform macosx --minimum-deployment-target "11
 ```
 and create an identical archive compared to the system version.
 
-You can use /usr/bin/actool which will call the system version. It only has access to the paths under /app and can only be used with relative paths. Don't try to use it to read/write in /tmp and other places.
+You can use /usr/bin/actool which will call the system version. Don't try to use it to read/write in /tmp and other places which may be shared - use local subdirectories.
 
 You can create tools to help the analysis, comparison, compiling, etc. but the main app should have the cli and arguments compatible with the original.
