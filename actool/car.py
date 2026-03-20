@@ -170,22 +170,43 @@ def _parse_version(ver_str: str) -> tuple:
 _MIN_LZFSE_VERSION = {"macosx": (10, 11), "iphoneos": (9, 0),
                        "appletvos": (9, 0), "watchos": (2, 0)}
 
+# Deepmap2 (DMP2) is used by the system actool for macOS >= 11.0.
+_MIN_DMP2_VERSION = {"macosx": (11, 0), "iphoneos": (14, 0),
+                      "appletvos": (14, 0), "watchos": (7, 0)}
+
 
 def compress_data(pixel_data: bytes, pixel_format: bytes,
                   width: int, height: int,
                   min_deploy: str = "10.11",
-                  platform: str = "macosx") -> bytes:
+                  platform: str = "macosx",
+                  allow_dmp2: bool = False) -> bytes:
     """Compress pixel data and return the rendition payload (CELM block).
 
-    Uses CELM ver=2 with LZFSE compression (comp=4) when liblzfse is
-    available, the deployment target supports LZFSE (>= macOS 10.11),
-    and compression reduces size. Falls back to uncompressed CELM ver=1
-    (comp=0).
+    Compression selection (matching system actool behaviour):
+    - macOS >= 11.0 with allow_dmp2: DMP2 via vImage (CELM ver=2, comp=11)
+    - macOS >= 10.11: LZFSE (CELM ver=2, comp=4)
+    - Older: Uncompressed (CELM ver=1, comp=0)
+
+    The system actool only uses DMP2 for packed atlas textures (layout 1004),
+    not for standalone images. Callers should set allow_dmp2=True only for
+    atlas data to match this behaviour.
 
     Important: CELM ver=1 comp=4 crashes CoreUI ('Can't find the correct
     chunk'). LZFSE requires CELM ver=2.
     """
+    from . import deepmap2
+
     deploy_ver = _parse_version(min_deploy)
+
+    # Try DMP2 for packed atlas data on deployment targets that support it
+    if allow_dmp2:
+        dmp2_min = _MIN_DMP2_VERSION.get(platform, (11, 0))
+        if deploy_ver >= dmp2_min and len(pixel_data) > 256:
+            dmp2_data = deepmap2.encode(pixel_data, pixel_format, width, height)
+            if dmp2_data is not None:
+                return deepmap2.make_celm_dmp2(dmp2_data, pixel_format)
+
+    # Fall back to LZFSE
     lzfse_min = _MIN_LZFSE_VERSION.get(platform, (10, 11))
     can_lzfse = HAS_LZFSE and deploy_ver >= lzfse_min
 
@@ -342,9 +363,10 @@ def build_packed_asset_csi(name: str, width: int, height: int,
     tlv += make_exif_orientation_tlv()
     tlv += make_bytes_per_row_tlv(width, pixel_format)
 
-    # Compress the atlas pixel data
+    # Compress the atlas pixel data (DMP2 eligible for packed atlases)
     rend_data = compress_data(pixel_data, pixel_format, width, height,
-                              min_deploy=min_deploy, platform=platform)
+                              min_deploy=min_deploy, platform=platform,
+                              allow_dmp2=True)
 
     return build_csi(
         width=width, height=height, scale_factor=scale_factor,
