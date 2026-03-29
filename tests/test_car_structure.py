@@ -211,5 +211,46 @@ class TestNestedGroups(unittest.TestCase):
             shutil.rmtree(tmpdir)
 
 
+class TestScaleFiltering(unittest.TestCase):
+    """Test that unsupported scales are filtered by platform.
+
+    Regression: 3x scale images were included for macOS, which only
+    supports 1x and 2x. Extra renditions caused app crashes.
+    """
+
+    def test_3x_excluded_for_macos(self):
+        """macOS platform must not include 3x scale renditions."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_scale_")
+        try:
+            catalog = os.path.join(tmpdir, "Test.xcassets")
+            os.makedirs(catalog)
+            import json
+            with open(os.path.join(catalog, "Contents.json"), "w") as f:
+                json.dump({"info": {"author": "xcode", "version": 1}}, f)
+
+            # Create imageset with 1x, 2x, and 3x
+            iset = os.path.join(catalog, "Tri.imageset")
+            os.makedirs(iset)
+            from PIL import Image
+            for scale, suffix in [(1, ""), (2, "@2x"), (3, "@3x")]:
+                Image.new("RGBA", (16 * scale, 16 * scale), (100, 0, 0, 255)).save(
+                    os.path.join(iset, f"Tri{suffix}.png"))
+            with open(os.path.join(iset, "Contents.json"), "w") as f:
+                json.dump({"images": [
+                    {"filename": "Tri.png", "idiom": "universal", "scale": "1x"},
+                    {"filename": "Tri@2x.png", "idiom": "universal", "scale": "2x"},
+                    {"filename": "Tri@3x.png", "idiom": "universal", "scale": "3x"},
+                ], "info": {"author": "xcode", "version": 1}}, f)
+
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "11.0")
+            info = parse_car_info(os.path.join(outdir, "Assets.car"))
+            # Should have 2 renditions (1x + 2x), not 3
+            self.assertEqual(info["rendition_count"], 2,
+                             f"Expected 2 renditions (1x+2x), got {info['rendition_count']}")
+        finally:
+            shutil.rmtree(tmpdir)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -214,6 +214,10 @@ class AssetCatalog:
             if self.platform == "macosx" and idiom not in ("mac", "universal"):
                 continue
 
+            # macOS only supports 1x and 2x scales
+            if self.platform == "macosx" and scale > 2:
+                continue
+
             locale = img_info.get("locale", "")
 
             # Language filtering
