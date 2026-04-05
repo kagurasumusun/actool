@@ -152,13 +152,21 @@ def encode(pixel_data: bytes, pixel_format: bytes,
     return result
 
 
-def make_celm_dmp2(dmp2_data: bytes, pixel_format: bytes) -> bytes:
-    """Wrap raw dmp2 data in a CELM ver=2 comp=11 envelope.
+def make_celm_dmp2(dmp2_data: bytes, pixel_format: bytes,
+                   inline: bool = False) -> bytes:
+    """Wrap raw dmp2 data in a CELM comp=11 envelope.
 
-    The system actool uses a 16-byte sub-header between the CELM header
-    and the dmp2 payload:
+    For packed atlas textures (inline=False): uses CELM ver=2 with a
+    16-byte sub-header between the CELM header and the dmp2 payload:
         [version=1(4)][deepmap2_pixfmt(4)][dmp2_len(4)][zero(4)]
+
+    For inline images (inline=True): uses CELM ver=0 with raw dmp2
+    data directly after the CELM header (no sub-header).
     """
+    if inline:
+        celm = struct.pack("<4sIII", b"MLEC", 0, 11, len(dmp2_data))
+        return celm + dmp2_data
+
     dm_fmt = _PIXFMT_MAP.get(pixel_format, 0)
     dmp2_len = len(dmp2_data)
 

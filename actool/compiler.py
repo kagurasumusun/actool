@@ -12,7 +12,7 @@ from . import car
 from .bom import BOMWriter
 from .catalog import AssetCatalog
 from .icns import create_icns
-from .packer import PackedImage, Atlas, pack_images, group_for_packing
+from .packer import PackedImage, Atlas, pack_images_split, group_for_packing
 
 
 def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
@@ -46,9 +46,17 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
     # Group renditions for atlas packing
     pack_groups, inline_renditions = group_for_packing(renditions)
 
-    # Compute dynamic keyformat: include dim1 if packing produces multiple groups
-    # (packed assets use dim1_counter as dim1 values)
-    uses_dim1 = len(pack_groups) > 1
+    # Compute dynamic keyformat: include dim1 if packing produces multiple atlases
+    # First do a trial split to count total atlases
+    trial_atlas_count = 0
+    for fmt, scale, rends in pack_groups:
+        trial_imgs = [PackedImage(name=r.name, identifier=r.identifier,
+                                  width=r.width, height=r.height,
+                                  pixel_format=r.pixel_format, scale=r.scale,
+                                  part=r.part, dim2=r.dim2)
+                      for r in rends]
+        trial_atlas_count += len(pack_images_split(trial_imgs, max_width=262))
+    uses_dim1 = trial_atlas_count > 1
     keyformat_attrs = car.compute_keyformat(renditions, force_dim1=uses_dim1)
 
     # Set keyformat and deployment info on all renditions
@@ -60,7 +68,12 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
 
     # Build atlas textures and their references
     all_rendition_entries = []
-    dim1_counter = 0
+    # Per-scale dim1 counters (Apple resets dim1 for each scale)
+    dim1_by_scale: dict[int, int] = {}
+
+    # Sort pack groups by (scale, format) — BGRA before GA8 within each scale
+    # BGRA (b"BGRA") sorts after GA8 (b" 8AG"), so use reverse fmt order
+    pack_groups.sort(key=lambda g: (g[1], 0 if g[0] == b"BGRA" else 1))
 
     for fmt, scale, rends in pack_groups:
         # Check if this is a sprite atlas group
@@ -69,6 +82,10 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
         # Create packed images
         packed_imgs = []
         for rend in rends:
+            # Resolve template intent: explicit field takes priority, else legacy bool
+            intent = rend.template_rendering_intent
+            if intent < 0:
+                intent = 2 if rend.is_template else 4
             packed_imgs.append(PackedImage(
                 name=rend.name,
                 identifier=rend.identifier,
@@ -78,76 +95,80 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
                 pixel_format=rend.pixel_format,
                 scale=rend.scale,
                 is_template=rend.is_template,
+                template_rendering_intent=intent,
                 part=rend.part,
                 dim2=rend.dim2,
             ))
 
-        # Pack into atlas
-        atlas = pack_images(packed_imgs)
-        atlas.dim1 = dim1_counter
-        atlas.render()
+        # Split into multiple atlases if needed
+        atlases = pack_images_split(packed_imgs, max_width=262)
 
-        # Determine atlas name and key
-        if sprite_atlas_id:
-            # Explicit packed asset for sprite atlas
-            atlas_name = atlas.name.replace("ZZZZPackedAsset",
-                                            "ZZZZExplicitlyPackedAsset")
-            atlas_key = car.make_rendition_key(
-                element=car.ELEMENT_PACKED,
-                part=car.PART_REGULAR,
-                identifier=sprite_atlas_id,
-                dim1=dim1_counter,
-                scale=scale,
-                keyformat=keyformat_attrs,
-            )
-        else:
-            atlas_name = atlas.name
-            atlas_key = car.make_rendition_key(
-                element=car.ELEMENT_PACKED,
-                part=car.PART_REGULAR,
-                dim1=dim1_counter,
-                scale=scale,
-                keyformat=keyformat_attrs,
-            )
+        for atlas in atlases:
+            dim1_counter = dim1_by_scale.get(scale, 0)
+            atlas.dim1 = dim1_counter
+            atlas.render()
 
-        atlas_csi = car.build_packed_asset_csi(
-            name=atlas_name,
-            width=atlas.width,
-            height=atlas.height,
-            scale=scale,
-            pixel_format=fmt,
-            pixel_data=atlas.pixel_data,
-            min_deploy=min_deploy,
-            platform=platform,
-        )
-        all_rendition_entries.append((atlas_key, atlas_csi))
+            # Determine atlas name and key
+            if sprite_atlas_id:
+                atlas_name = atlas.name.replace("ZZZZPackedAsset",
+                                                "ZZZZExplicitlyPackedAsset")
+                atlas_key = car.make_rendition_key(
+                    element=car.ELEMENT_PACKED,
+                    part=car.PART_REGULAR,
+                    identifier=sprite_atlas_id,
+                    dim1=dim1_counter,
+                    scale=scale,
+                    keyformat=keyformat_attrs,
+                )
+            else:
+                atlas_name = atlas.name
+                atlas_key = car.make_rendition_key(
+                    element=car.ELEMENT_PACKED,
+                    part=car.PART_REGULAR,
+                    dim1=dim1_counter,
+                    scale=scale,
+                    keyformat=keyformat_attrs,
+                )
 
-        # Create PackedImage references (layout 1003) for each image
-        for img in atlas.images:
-            ref_key = car.make_rendition_key(
-                element=car.ELEMENT_UNIVERSAL,
-                part=img.part,
-                identifier=img.identifier,
-                dim2=img.dim2,
-                scale=scale,
-                keyformat=keyformat_attrs,
-            )
-            # INLK y is in bottom-left origin (CoreGraphics convention)
-            inlk_y = atlas.height - img.y - img.height
-            ref_csi = car.build_packed_image_csi(
-                name=img.name,
-                width=img.width,
-                height=img.height,
+            atlas_csi = car.build_packed_asset_csi(
+                name=atlas_name,
+                width=atlas.width,
+                height=atlas.height,
                 scale=scale,
                 pixel_format=fmt,
-                x=img.x,
-                y=inlk_y,
-                atlas_identifier=sprite_atlas_id,
-                atlas_dim1=dim1_counter,
+                pixel_data=atlas.pixel_data,
+                min_deploy=min_deploy,
+                platform=platform,
             )
-            all_rendition_entries.append((ref_key, ref_csi))
+            all_rendition_entries.append((atlas_key, atlas_csi))
 
-        dim1_counter += 1
+            # Create PackedImage references (layout 1003) for each image
+            for img in atlas.images:
+                ref_key = car.make_rendition_key(
+                    element=car.ELEMENT_UNIVERSAL,
+                    part=img.part,
+                    identifier=img.identifier,
+                    dim2=img.dim2,
+                    scale=scale,
+                    keyformat=keyformat_attrs,
+                )
+                # INLK y is in bottom-left origin (CoreGraphics convention)
+                inlk_y = atlas.height - img.y - img.height
+                ref_csi = car.build_packed_image_csi(
+                    name=img.name,
+                    width=img.width,
+                    height=img.height,
+                    scale=scale,
+                    pixel_format=fmt,
+                    x=img.x,
+                    y=inlk_y,
+                    atlas_identifier=sprite_atlas_id,
+                    atlas_dim1=dim1_counter,
+                    rendition_flags=_compute_rendition_flags(img),
+                )
+                all_rendition_entries.append((ref_key, ref_csi))
+
+            dim1_by_scale[scale] = dim1_counter + 1
 
     # Add sprite atlas metadata renditions
     # Collect sprite names per atlas
@@ -194,12 +215,8 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
     bom.add_named_block("CARHEADER",
                         car.make_carheader(len(all_rendition_entries)))
 
-    # Add KEYFORMAT
-    bom.add_named_block("KEYFORMAT", car.make_keyformat(keyformat_attrs))
-
-    # Add EXTENDED_METADATA
-    bom.add_named_block("EXTENDED_METADATA",
-                        car.make_extended_metadata(platform, min_deploy))
+    # Build RENDITIONS tree (added early to match Apple's block order)
+    bom.add_tree("RENDITIONS", all_rendition_entries)
 
     # Build FACETKEYS tree
     facetkey_entries = []
@@ -210,8 +227,21 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
         facetkey_entries.append((key_data, value_data))
     bom.add_tree("FACETKEYS", facetkey_entries)
 
-    # Build RENDITIONS tree
-    bom.add_tree("RENDITIONS", all_rendition_entries)
+    # Build APPEARANCEKEYS tree — maps appearance names to IDs
+    has_appearances = any(r.appearance != 0 for r in renditions)
+    if has_appearances:
+        appearance_entries = [
+            (b"NSAppearanceNameDarkAqua", struct.pack("<H", 1)),
+            (b"NSAppearanceNameSystem", struct.pack("<H", 0)),
+        ]
+        bom.add_tree("APPEARANCEKEYS", appearance_entries)
+
+    # Add KEYFORMAT
+    bom.add_named_block("KEYFORMAT", car.make_keyformat(keyformat_attrs))
+
+    # Add EXTENDED_METADATA
+    bom.add_named_block("EXTENDED_METADATA",
+                        car.make_extended_metadata(platform, min_deploy))
 
     # Build BITMAPKEYS tree (raw identifier keys, not block refs)
     bitmapkey_entries = _build_bitmapkeys(
@@ -362,4 +392,17 @@ def _write_info_plist(path: str, app_icon: str = None,
     with open(path, "w") as f:
         f.write("\n".join(lines))
 
+
+def _compute_rendition_flags(img) -> int:
+    """Compute renditionFlags for a packed image reference.
+
+    Combines bitmapEncoding (template intent) with isOpaque bit.
+    """
+    flags = img.template_rendering_intent << 2
+    # isOpaque (bit 1): check if all alpha values are 255
+    if img.pixel_data:
+        if car._check_opaque(img.pixel_data, img.pixel_format,
+                             img.width, img.height):
+            flags |= 0x02
+    return flags
 

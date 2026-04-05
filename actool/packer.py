@@ -37,6 +37,7 @@ class PackedImage:
     pixel_format: bytes = b"BGRA"
     scale: int = 1
     is_template: bool = False
+    template_rendering_intent: int = 4  # bitmapEncoding: 0=original, 4=automatic, 2=template
     part: int = 181  # PART_REGULAR by default, PART_ICON for icons
     dim2: int = 0  # For icon images, the multisize index
 
@@ -55,13 +56,15 @@ class Atlas:
     @property
     def name(self) -> str:
         fmt_idx = 0 if self.pixel_format == b"BGRA" else 1
-        return f"ZZZZPackedAsset-{self.scale}.0.{fmt_idx}-gamut0"
+        return f"ZZZZPackedAsset-{self.scale}.1.{fmt_idx}-gamut0"
 
     @property
     def bytes_per_row(self) -> int:
-        """Row stride in bytes, aligned to 32 bytes."""
-        bpp = 4 if self.pixel_format == b"BGRA" else 2
-        exact = self.width * bpp
+        """Row stride in bytes, aligned to 32 bytes.
+
+        CoreUI always reads rows at 4-bpp stride, even for GA8 (2 bpp).
+        """
+        exact = self.width * 4
         return ((exact + 31) // 32) * 32
 
     def render(self):
@@ -70,17 +73,21 @@ class Atlas:
         Rows are padded to 32-byte alignment to match CoreUI's expected
         stride. The buffer uses top-down row order; the INLK y coordinates
         are flipped to bottom-left origin separately by the compiler.
+
+        CoreUI always uses 4-bpp stride for the atlas, even for GA8 images.
+        Source GA8 data (2 bpp) is placed at 4-bpp offsets in the atlas.
         """
-        bpp = 4 if self.pixel_format == b"BGRA" else 2
+        actual_bpp = 4 if self.pixel_format == b"BGRA" else 2
+        atlas_bpp = 4  # CoreUI always uses 4 bpp stride
         bpr = self.bytes_per_row
         buf = bytearray(bpr * self.height)
 
         for img in self.images:
-            src_stride = img.width * bpp
+            src_stride = img.width * actual_bpp
 
             for row in range(img.height):
                 src_off = row * src_stride
-                dst_off = (img.y + row) * bpr + img.x * bpp
+                dst_off = (img.y + row) * bpr + img.x * atlas_bpp
                 buf[dst_off:dst_off + src_stride] = \
                     img.pixel_data[src_off:src_off + src_stride]
 
@@ -88,86 +95,177 @@ class Atlas:
 
 
 def pack_images(images: list[PackedImage], max_width: int = 2048) -> Atlas:
-    """Pack images into an atlas using column-based packing.
+    """Pack images into atlas(es) using shelf-based packing.
 
-    Uses a column-first approach: sorts by height desc, packs into columns,
-    then fills remaining space with shorter images.
+    Uses shelf packing to match Apple's actool layout: images are arranged
+    in horizontal shelves, with column stacking within each shelf. When a
+    single atlas would exceed the height limit, splits into multiple atlases.
+
+    Returns a single Atlas when all images fit, or the first atlas from
+    a multi-atlas split.
     """
     if not images:
         return Atlas()
 
-    atlas = Atlas(
-        pixel_format=images[0].pixel_format,
-        scale=images[0].scale,
-    )
+    atlases = pack_images_split(images, max_width=max_width)
+    return atlases[0] if atlases else Atlas()
 
-    # Sort by height descending, then width descending
-    sorted_imgs = sorted(images, key=lambda i: (-i.height, -i.width))
 
-    # Column-based packing
-    columns: list[list[PackedImage]] = []
-    col_x_positions: list[int] = []
-    col_widths: list[int] = []
-    col_heights: list[int] = []
+def pack_images_split(images: list[PackedImage], max_width: int = 2048,
+                      max_height: int = 196) -> list[Atlas]:
+    """Pack images into multiple atlases using shelf-based bin packing.
+
+    Matches Apple's actool packing strategy:
+    - First shelf determines atlas width
+    - Subsequent shelves fill within that width
+    - Images can be stacked vertically within a shelf (column-within-shelf)
+    - When height exceeds max_height, overflow images go to a new atlas
+    - When starting a new atlas, widest remaining image goes first
+    """
+    if not images:
+        return []
+
+    remaining = sorted(images, key=lambda i: (-i.height, -i.width))
+    atlases = []
+
+    while remaining:
+        atlas = Atlas(
+            pixel_format=remaining[0].pixel_format,
+            scale=remaining[0].scale,
+        )
+
+        placed, overflow = _pack_shelf_atlas(
+            atlas, remaining, max_width, max_height)
+        atlases.append(atlas)
+        remaining = overflow
+
+    return atlases
+
+
+def _pack_shelf_atlas(atlas: Atlas, sorted_imgs: list[PackedImage],
+                      max_width: int, max_height: int
+                      ) -> tuple[list[PackedImage], list[PackedImage]]:
+    """Pack images into a single atlas using shelf-based packing.
+
+    The first shelf can grow the atlas width freely. Subsequent shelves
+    are constrained to fit within the width established by the first shelf.
+
+    Returns (placed, overflow) lists.
+    """
+    # Shelves: each shelf has columns of images
+    shelves: list[dict] = []  # {y, height, columns: [{x, width, images, bottom}]}
+    atlas_width = 0  # Set by first shelf, constrains subsequent shelves
+
+    placed = []
+    overflow = []
 
     for img in sorted_imgs:
-        placed = False
+        fit = False
 
-        # Try to place in an existing column (if image fits in width)
-        for ci in range(len(columns)):
-            col_w = col_widths[ci]
-            col_h = col_heights[ci]
+        # Try to fit in an existing shelf's column or as a new column
+        for si, shelf in enumerate(shelves):
+            is_first_shelf = (si == 0)
 
-            if img.width <= col_w:
-                # Check if there's vertical space
-                # No explicit height limit, just pack vertically
-                img.x = col_x_positions[ci]
-                img.y = col_h + GAP
-                columns[ci].append(img)
-                col_heights[ci] = img.y + img.height
-                placed = True
+            # Try existing columns within this shelf
+            for col in shelf['columns']:
+                if img.width <= col['width']:
+                    new_bottom = col['bottom'] + GAP + img.height
+                    if new_bottom <= shelf['y'] + shelf['height']:
+                        # Fits within shelf height
+                        img.x = col['x']
+                        img.y = col['bottom'] + GAP
+                        col['images'].append(img)
+                        col['bottom'] = img.y + img.height
+                        placed.append(img)
+                        fit = True
+                        break
+
+            if fit:
                 break
 
-        if not placed:
-            # Start a new column
-            if columns:
-                new_x = col_x_positions[-1] + col_widths[-1] + GAP
+            # Try new column on this shelf
+            if shelf['columns']:
+                last_col = shelf['columns'][-1]
+                new_x = last_col['x'] + last_col['width'] + GAP
             else:
                 new_x = MARGIN
 
-            if new_x + img.width + MARGIN <= max_width or not columns:
-                img.x = new_x
-                img.y = MARGIN
-                columns.append([img])
-                col_x_positions.append(new_x)
-                col_widths.append(img.width)
-                col_heights.append(img.y + img.height)
-            else:
-                # Shouldn't happen with reasonable max_width, but handle it
-                img.x = MARGIN
-                img.y = max(col_heights) + GAP
-                if columns:
-                    columns[0].append(img)
-                    col_heights[0] = img.y + img.height
-                else:
-                    columns.append([img])
-                    col_x_positions.append(MARGIN)
-                    col_widths.append(img.width)
-                    col_heights.append(img.y + img.height)
+            if img.height <= shelf['height']:
+                # First shelf can grow atlas width; others are constrained
+                width_ok = (is_first_shelf and
+                            new_x + img.width + MARGIN <= max_width)
+                if not width_ok and atlas_width > 0:
+                    width_ok = new_x + img.width + MARGIN <= atlas_width
+                if not width_ok and not shelf['columns']:
+                    width_ok = True  # First column always fits
+
+                if width_ok:
+                    img.x = new_x
+                    img.y = shelf['y']
+                    shelf['columns'].append({
+                        'x': new_x,
+                        'width': img.width,
+                        'images': [img],
+                        'bottom': img.y + img.height,
+                    })
+                    # First shelf determines atlas width
+                    new_right = new_x + img.width + MARGIN
+                    if new_right > atlas_width:
+                        atlas_width = new_right
+                    placed.append(img)
+                    fit = True
+                    break
+
+        if fit:
+            continue
+
+        # Try new shelf
+        if shelves:
+            last_shelf = shelves[-1]
+            new_y = last_shelf['y'] + last_shelf['height'] + GAP
+        else:
+            new_y = MARGIN
+
+        if new_y + img.height + MARGIN <= max_height or not shelves:
+            shelf_height = img.height
+            img.x = MARGIN
+            img.y = new_y
+
+            shelf = {
+                'y': new_y,
+                'height': shelf_height,
+                'columns': [{
+                    'x': MARGIN,
+                    'width': img.width,
+                    'images': [img],
+                    'bottom': img.y + img.height,
+                }],
+            }
+            shelves.append(shelf)
+
+            # Update atlas width
+            new_right = MARGIN + img.width + MARGIN
+            if new_right > atlas_width:
+                atlas_width = new_right
+            placed.append(img)
+        else:
+            overflow.append(img)
 
     # Calculate atlas dimensions
-    if columns:
-        atlas.width = max(cx + cw for cx, cw in zip(col_x_positions, col_widths)) + MARGIN
-        atlas.height = max(col_heights) + MARGIN
+    if shelves:
+        atlas.width = atlas_width
+        max_bottom = 0
+        for shelf in shelves:
+            for col in shelf['columns']:
+                if col['bottom'] > max_bottom:
+                    max_bottom = col['bottom']
+        atlas.height = max_bottom + MARGIN
     else:
         atlas.width = 0
         atlas.height = 0
 
-    # Collect all placed images
-    for col in columns:
-        atlas.images.extend(col)
-
-    return atlas
+    atlas.images = placed
+    return placed, overflow
 
 
 def group_for_packing(renditions) -> tuple[list, list]:
@@ -199,11 +297,18 @@ def group_for_packing(renditions) -> tuple[list, list]:
         if hasattr(rend, '_csi_override'):
             icon_renditions.append(rend)
             continue
+        # Template images with transparency are stored inline
+        # (opaque template images pack normally)
+        if rend.template_rendering_intent == 2 and rend.pixel_data:
+            if not car._check_opaque(rend.pixel_data, rend.pixel_format,
+                                     rend.width, rend.height):
+                icon_renditions.append(rend)
+                continue
 
-        # Group by format, scale, icon status, and sprite atlas
-        is_icon = rend.part == car.PART_ICON
+        # Group by format, scale, and sprite atlas
+        # Icons pack together with regular images (Apple doesn't separate them)
         atlas_id = rend.sprite_atlas_id  # 0 for regular, non-zero for sprites
-        key = (rend.pixel_format, rend.scale, is_icon, atlas_id)
+        key = (rend.pixel_format, rend.scale, atlas_id)
         if key not in groups:
             groups[key] = []
         groups[key].append(rend)
@@ -212,7 +317,7 @@ def group_for_packing(renditions) -> tuple[list, list]:
     pack_groups = []
     inline = list(icon_renditions)
 
-    for (fmt, scale, _is_icon, _atlas_id), rends in sorted(groups.items()):
+    for (fmt, scale, _atlas_id), rends in sorted(groups.items()):
         if len(rends) >= 2:
             pack_groups.append((fmt, scale, rends))
         else:

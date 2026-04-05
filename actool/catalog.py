@@ -7,6 +7,7 @@ Reads .xcassets directories and produces Rendition objects for compilation.
 import json
 import os
 import struct
+import zlib
 from pathlib import Path
 from typing import Optional
 
@@ -36,15 +37,13 @@ MACOS_ICON_SIZES = [
 
 
 def _hash_name(name: str) -> int:
-    """Generate a deterministic identifier from a name.
+    """Generate a deterministic 16-bit identifier from a name.
 
-    Apple uses some hash function to assign identifiers to facets.
-    We replicate the behavior by using a simple hash.
+    The exact value isn't significant for CoreUI — only that the same
+    name always maps to the same id. We fold a CRC32 of the UTF-8 bytes
+    down to 16 bits.
     """
-    h = 0
-    for c in name:
-        h = (h * 31 + ord(c)) & 0xFFFF
-    return h
+    return (zlib.crc32(name.encode("utf-8")) & 0xFFFF) or 1
 
 
 def load_image_as_bgra(path: str) -> tuple[bytes, int, int, bytes]:
@@ -92,6 +91,22 @@ def load_image_as_bgra(path: str) -> tuple[bytes, int, int, bytes]:
         img = Image.merge("RGBA", (b, g, r, a))
         pixel_data = img.tobytes()
         return pixel_data, img.width, img.height, b"BGRA"
+
+
+def _parse_color_component(value: str) -> float:
+    """Parse a color component from xcassets Contents.json.
+
+    Values can be:
+    - Float 0-1: "0.500"
+    - Integer 0-255: "128" (normalised to 0-1)
+    - Hex: "0x80" (normalised to 0-1)
+    """
+    if value.startswith("0x") or value.startswith("0X"):
+        return int(value, 16) / 255.0
+    f = float(value)
+    if f > 1.0:
+        return f / 255.0
+    return f
 
 
 class AssetCatalog:
@@ -183,7 +198,6 @@ class AssetCatalog:
         """Parse a .imageset directory."""
         name = item.stem
         ident = self._get_identifier(name)
-        is_template = False
 
         contents_path = item / "Contents.json"
         if not contents_path.exists():
@@ -192,10 +206,12 @@ class AssetCatalog:
         with open(contents_path) as f:
             contents = json.load(f)
 
-        # Check template rendering intent
+        # Template rendering intent (bitmapEncoding values):
+        # original=0, automatic=4, template=2
         props = contents.get("properties", {})
-        if props.get("template-rendering-intent") == "template":
-            is_template = True
+        intent_str = props.get("template-rendering-intent")
+        intent_map = {"original": 0, "template": 2}
+        template_intent = intent_map.get(intent_str, 4)  # default = automatic
 
         images = contents.get("images", [])
         for img_info in images:
@@ -241,8 +257,9 @@ class AssetCatalog:
                 pixel_data=pixel_data,
                 pixel_format=pixel_format,
                 layout=car.LAYOUT_ONE_PART_SCALE,
-                is_template=is_template,
+                template_rendering_intent=template_intent,
                 locale=locale,
+                colorspace_id=2 if pixel_format == b" 8AG" else 1,
             )
             renditions.append(rend)
 
@@ -303,6 +320,8 @@ class AssetCatalog:
                 pixel_format=pixel_format,
                 layout=car.LAYOUT_ONE_PART_SCALE,
                 dim2=dim2,
+                template_rendering_intent=0,  # Icons are always original
+                colorspace_id=2 if pixel_format == b" 8AG" else 1,
             )
             renditions.append(rend)
             icon_renditions.append((rend, point_w, pixel_size))
@@ -343,13 +362,15 @@ class AssetCatalog:
             if not components:
                 continue
 
-            r = float(components.get("red", 0))
-            g = float(components.get("green", 0))
-            b = float(components.get("blue", 0))
-            a = float(components.get("alpha", 1))
+            r = _parse_color_component(components.get("red", "0"))
+            g = _parse_color_component(components.get("green", "0"))
+            b = _parse_color_component(components.get("blue", "0"))
+            a = _parse_color_component(components.get("alpha", "1"))
 
             colorspace = color_data.get("color-space", "srgb")
-            cs_id = 0  # sRGB
+            cs_map = {"srgb": 1, "display-p3": 2, "extended-srgb": 4,
+                      "extended-linear-srgb": 7, "gray-gamma-22": 1}
+            cs_id = cs_map.get(colorspace, 1)
 
             # Check for appearance variants (dark mode)
             appearance = 0
@@ -369,7 +390,7 @@ class AssetCatalog:
                 appearance=appearance,
                 layout=car.LAYOUT_COLOR,
                 pixel_format=b"\x00\x00\x00\x00",
-                colorspace_id=cs_id,
+                colorspace_id=0,  # CSI header colorspace is always 0 for colors
             )
             rend._csi_override = csi
             renditions.append(rend)
@@ -464,6 +485,7 @@ class AssetCatalog:
                         pixel_format=pixel_format,
                         layout=car.LAYOUT_ONE_PART_SCALE,
                         sprite_atlas_id=atlas_ident,
+                        colorspace_id=2 if pixel_format == b" 8AG" else 1,
                     )
                     renditions.append(rend)
 
@@ -537,6 +559,7 @@ class AssetCatalog:
                     pixel_data=pixel_data,
                     pixel_format=pixel_format,
                     layout=car.LAYOUT_ONE_PART_SCALE,
+                    colorspace_id=2 if pixel_format == b" 8AG" else 1,
                 )
                 renditions.append(rend)
 
