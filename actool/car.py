@@ -430,10 +430,9 @@ def build_color_csi(name: str, red: float, green: float, blue: float,
     colr = struct.pack("<4sI", b"RLOC", 1)  # 'COLR' as LE, version=1
     colr += struct.pack("<I", colorspace_id & 0xFF)  # colorspace byte (1=sRGB)
     colr += struct.pack("<I", 4)  # number of components (RGBA)
-    # Cast through float32 to match Apple's precision (float32 intermediate)
-    def _f32(x):
-        return struct.unpack('<f', struct.pack('<f', x))[0]
-    colr += struct.pack("<4d", _f32(red), _f32(green), _f32(blue), _f32(alpha))
+    # Values are already at the precision Apple's actool produces;
+    # _parse_color_component applies float32 casts where appropriate.
+    colr += struct.pack("<4d", red, green, blue, alpha)
 
     tlv = make_color_blend_opacity_tlv()
     tlv += make_exif_orientation_tlv()

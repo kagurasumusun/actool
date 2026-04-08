@@ -97,16 +97,28 @@ def _parse_color_component(value: str) -> float:
     """Parse a color component from xcassets Contents.json.
 
     Values can be:
-    - Float 0-1: "0.500"
-    - Integer 0-255: "128" (normalised to 0-1)
-    - Hex: "0x80" (normalised to 0-1)
+    - Float 0-1: "0.500" (parsed through float32 to match Apple precision)
+    - Integer 0-255: "128" (exact double, normalised to 0-1)
+    - Hex: "0x80" (exact double, normalised to 0-1)
+
+    Integer and hex values round-trip as exact doubles. Decimal string
+    values are cast through float32 because Apple's actool parses them
+    with single-precision intermediates (matching `strtof` behavior).
     """
+    import struct as _struct
     if value.startswith("0x") or value.startswith("0X"):
         return int(value, 16) / 255.0
+    # Integer form ("128") has no decimal point or exponent.
+    if all(c.isdigit() or c in "+-" for c in value):
+        i = int(value)
+        if i > 1 or i < 0:
+            return i / 255.0
+        return float(i)
     f = float(value)
     if f > 1.0:
         return f / 255.0
-    return f
+    # Cast through float32 to match Apple's single-precision parsing.
+    return _struct.unpack('<f', _struct.pack('<f', f))[0]
 
 
 class AssetCatalog:

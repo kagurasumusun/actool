@@ -550,3 +550,143 @@ def parse_car_atlas_keys(car_path):
             atlas_keys.add((tok_map.get(8, 0), tok_map.get(12, 0)))
 
     return atlas_keys
+
+
+def _read_car_blocks(car_path):
+    """Low-level CAR reader. Returns (data, blocks_dict, named_dict, read_fn)."""
+    with open(car_path, 'rb') as f:
+        data = f.read()
+    idx_off = struct.unpack('>I', data[16:20])[0]
+    idx_len = struct.unpack('>I', data[20:24])[0]
+    idx_data = data[idx_off:idx_off + idx_len]
+    n = struct.unpack('>I', idx_data[:4])[0]
+    blocks = {}
+    for i in range(n):
+        addr = struct.unpack('>I', idx_data[4 + i * 8:8 + i * 8])[0]
+        length = struct.unpack('>I', idx_data[8 + i * 8:12 + i * 8])[0]
+        if addr != 0 or length != 0:
+            blocks[i] = (addr, length)
+
+    def read_block(idx):
+        if idx not in blocks:
+            return b''
+        return data[blocks[idx][0]:blocks[idx][0] + blocks[idx][1]]
+
+    vars_off, vars_ln = struct.unpack('>II', data[24:32])
+    vd = data[vars_off:vars_off + vars_ln]
+    nv = struct.unpack('>I', vd[:4])[0]
+    named = {}
+    p = 4
+    for _ in range(nv):
+        bi = struct.unpack('>I', vd[p:p + 4])[0]
+        nl = vd[p + 4]
+        nm = vd[p + 5:p + 5 + nl].decode('ascii')
+        p += 5 + nl
+        named[nm] = bi
+    return data, blocks, named, read_block
+
+
+def _walk_tree_leaves(read_block, root_idx):
+    """Walk a BOM tree and return a list of (key_bytes, value_bytes)."""
+    leaves = []
+
+    def collect(block_idx):
+        nd = read_block(block_idx)
+        is_leaf = struct.unpack('>H', nd[:2])[0]
+        cnt = struct.unpack('>H', nd[2:4])[0]
+        if is_leaf:
+            pos = 12
+            for _ in range(cnt):
+                vi = struct.unpack('>I', nd[pos:pos + 4])[0]
+                ki = struct.unpack('>I', nd[pos + 4:pos + 8])[0]
+                pos += 8
+                leaves.append((read_block(ki), read_block(vi)))
+        else:
+            pos = 12
+            c = struct.unpack('>I', nd[pos:pos + 4])[0]
+            pos += 4
+            collect(c)
+            for _ in range(cnt):
+                pos += 4
+                c2 = struct.unpack('>I', nd[pos:pos + 4])[0]
+                pos += 4
+                collect(c2)
+
+    collect(root_idx)
+    return leaves
+
+
+def parse_car_csi_by_name(car_path):
+    """Parse all renditions from a CAR, returning dict name -> list of dicts.
+
+    Each dict has: flags, width, height, scale, pixel_format, cs, layout,
+    tlv_len, bitmaplist_unknown, rend_len, tlv (raw), rend (raw), key (raw),
+    and also a parsed 'tlvs' dict of {tag: payload_bytes}.
+    """
+    data, blocks, named, read_block = _read_car_blocks(car_path)
+    rend_tree = read_block(named['RENDITIONS'])
+    root = struct.unpack('>I', rend_tree[8:12])[0]
+    leaves = _walk_tree_leaves(read_block, root)
+
+    out = {}
+    for kd, vd in leaves:
+        if len(vd) < 184 or vd[:4] != b"ISTC":
+            continue
+        flags = struct.unpack('<I', vd[8:12])[0]
+        width = struct.unpack('<I', vd[12:16])[0]
+        height = struct.unpack('<I', vd[16:20])[0]
+        sf = struct.unpack('<I', vd[20:24])[0]
+        pf = bytes(vd[24:28])
+        cs = struct.unpack('<I', vd[28:32])[0]
+        layout = struct.unpack('<H', vd[36:38])[0]
+        name = vd[40:168].rstrip(b'\x00').decode('ascii', errors='replace')
+        tlv_len = struct.unpack('<I', vd[168:172])[0]
+        bitmaplist_unknown = struct.unpack('<I', vd[172:176])[0]
+        rend_len = struct.unpack('<I', vd[180:184])[0]
+        tlv = bytes(vd[184:184 + tlv_len])
+        rend = bytes(vd[184 + tlv_len:184 + tlv_len + rend_len])
+
+        tlvs = {}
+        p = 0
+        while p + 8 <= len(tlv):
+            tag = struct.unpack('<I', tlv[p:p + 4])[0]
+            tl = struct.unpack('<I', tlv[p + 4:p + 8])[0]
+            tlvs[tag] = bytes(tlv[p + 8:p + 8 + tl])
+            p += 8 + tl
+
+        entry = dict(
+            flags=flags, width=width, height=height, scale=sf // 100,
+            pixel_format=pf, cs=cs, layout=layout,
+            tlv_len=tlv_len, bitmaplist_unknown=bitmaplist_unknown,
+            rend_len=rend_len, tlv=tlv, rend=rend, tlvs=tlvs, key=bytes(kd),
+        )
+        out.setdefault(name, []).append(entry)
+    return out
+
+
+def parse_car_bom_tree(car_path, block_name):
+    """Return list of (key, value) for a named BOM tree block, or None if missing."""
+    data, blocks, named, read_block = _read_car_blocks(car_path)
+    if block_name not in named:
+        return None
+    tree = read_block(named[block_name])
+    if len(tree) < 12:
+        return None
+    root = struct.unpack('>I', tree[8:12])[0]
+    return _walk_tree_leaves(read_block, root)
+
+
+def parse_colr_rendition(rend_bytes):
+    """Parse a COLR rendition data block.
+
+    Returns dict: version, colorspace, components (tuple of floats).
+    """
+    if len(rend_bytes) < 16 or rend_bytes[:4] != b"RLOC":
+        return None
+    version = struct.unpack('<I', rend_bytes[4:8])[0]
+    colorspace = struct.unpack('<I', rend_bytes[8:12])[0]
+    count = struct.unpack('<I', rend_bytes[12:16])[0]
+    if len(rend_bytes) < 16 + count * 8:
+        return None
+    comps = struct.unpack(f'<{count}d', rend_bytes[16:16 + count * 8])
+    return dict(version=version, colorspace=colorspace, components=comps)
