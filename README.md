@@ -26,3 +26,6 @@ Also it's fun.
 
 The system has been implemented almost entirely automatically by Claude with
 deciduous planning.
+
+We're engaging only in cleanroom implementation based on known outputs of the
+original tool, with abundance of caution for potential legal issues.
