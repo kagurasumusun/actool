@@ -7,8 +7,9 @@ asset catalog data. All CAR-internal structures use little-endian byte order.
 
 import struct
 import uuid
-import zlib
 from dataclasses import dataclass, field
+
+from .name_hash import hash_name as _hash_name
 
 try:
     import liblzfse as lzfse
@@ -179,17 +180,16 @@ def compress_data(pixel_data: bytes, pixel_format: bytes,
                   width: int, height: int,
                   min_deploy: str = "10.11",
                   platform: str = "macosx",
-                  allow_dmp2: bool = False) -> bytes:
+                  allow_dmp2: bool = False,
+                  dmp2_inline: bool = False) -> bytes:
     """Compress pixel data and return the rendition payload (CELM block).
 
     Compression selection (matching system actool behaviour):
-    - macOS >= 11.0 with allow_dmp2: DMP2 via vImage (CELM ver=2, comp=11)
+    - macOS >= 11.0 with allow_dmp2: DMP2 via vImage
+      - dmp2_inline=True: CELM ver=0, raw DMP2 (for inline images)
+      - dmp2_inline=False: CELM ver=2 with sub-header (for packed atlases)
     - macOS >= 10.11: LZFSE (CELM ver=2, comp=4)
     - Older: Uncompressed (CELM ver=1, comp=0)
-
-    The system actool only uses DMP2 for packed atlas textures (layout 1004),
-    not for standalone images. Callers should set allow_dmp2=True only for
-    atlas data to match this behaviour.
 
     Important: CELM ver=1 comp=4 crashes CoreUI ('Can't find the correct
     chunk'). LZFSE requires CELM ver=2.
@@ -198,13 +198,14 @@ def compress_data(pixel_data: bytes, pixel_format: bytes,
 
     deploy_ver = _parse_version(min_deploy)
 
-    # Try DMP2 for packed atlas data on deployment targets that support it
+    # Try DMP2 on deployment targets that support it
     if allow_dmp2:
         dmp2_min = _MIN_DMP2_VERSION.get(platform, (11, 0))
         if deploy_ver >= dmp2_min and len(pixel_data) > 256:
             dmp2_data = deepmap2.encode(pixel_data, pixel_format, width, height)
             if dmp2_data is not None:
-                return deepmap2.make_celm_dmp2(dmp2_data, pixel_format)
+                return deepmap2.make_celm_dmp2(dmp2_data, pixel_format,
+                                               inline=dmp2_inline)
 
     # Fall back to LZFSE
     lzfse_min = _MIN_LZFSE_VERSION.get(platform, (10, 11))
@@ -286,10 +287,38 @@ def make_exif_orientation_tlv(orientation: int = 1) -> bytes:
     return struct.pack("<II", 0x03EE, len(data)) + data
 
 
+def _check_opaque(pixel_data: bytes, pixel_format: bytes,
+                  width: int, height: int) -> bool:
+    """Check if all alpha values in pixel data are 255 (fully opaque)."""
+    if pixel_format == b"BGRA":
+        # Alpha is byte 3 of each 4-byte pixel
+        bpr = width * 4
+        for row in range(height):
+            row_start = row * bpr
+            for col in range(width):
+                if pixel_data[row_start + col * 4 + 3] != 255:
+                    return False
+        return True
+    elif pixel_format == b" 8AG":
+        # Alpha is byte 1 of each 2-byte pixel
+        bpr = width * 2
+        for row in range(height):
+            row_start = row * bpr
+            for col in range(width):
+                if pixel_data[row_start + col * 2 + 1] != 255:
+                    return False
+        return True
+    return False
+
+
 def aligned_bytes_per_row(width: int, pixel_format: bytes) -> int:
-    """Calculate row stride aligned to 32 bytes."""
-    bpp = 4 if pixel_format == b"BGRA" else 2
-    exact = width * bpp
+    """Calculate row stride aligned to 32 bytes.
+
+    CoreUI always computes stride using 4 bytes per pixel regardless of
+    the actual pixel format (even GA8 which is 2 bpp).  Mismatched
+    strides cause BOMStream buffer overflows in CoreUI at runtime.
+    """
+    exact = width * 4
     return ((exact + 31) // 32) * 32
 
 
@@ -334,7 +363,8 @@ def build_packed_image_csi(name: str, width: int, height: int,
                            scale: int, pixel_format: bytes,
                            x: int, y: int,
                            atlas_identifier: int = 0,
-                           atlas_dim1: int = 0) -> bytes:
+                           atlas_dim1: int = 0,
+                           rendition_flags: int = 0) -> bytes:
     """Build a CSI for a packed image reference (layout 1003)."""
     scale_factor = scale * 100
 
@@ -347,11 +377,13 @@ def build_packed_image_csi(name: str, width: int, height: int,
     tlv += make_blend_opacity_tlv()
     tlv += make_exif_orientation_tlv()
 
+    cs_id = 2 if pixel_format == b" 8AG" else 1
     return build_csi(
         width=width, height=height, scale_factor=scale_factor,
         pixel_format=pixel_format, layout=LAYOUT_PACKED_IMAGE,
         name=name, tlv_data=tlv, rendition_data=b"",
-        colorspace_id=1, bitmaplist_unknown=1,
+        rendition_flags=rendition_flags,
+        colorspace_id=cs_id, bitmaplist_unknown=1,
     )
 
 
@@ -375,24 +407,35 @@ def build_packed_asset_csi(name: str, width: int, height: int,
                               min_deploy=min_deploy, platform=platform,
                               allow_dmp2=True)
 
+    # GA8 images use colorspace 2 (gray gamma 2.2)
+    cs_id = 2 if pixel_format == b" 8AG" else 1
+
     return build_csi(
         width=width, height=height, scale_factor=scale_factor,
         pixel_format=pixel_format, layout=LAYOUT_NAME_LIST,
         name=name, tlv_data=tlv, rendition_data=rend_data,
-        colorspace_id=1, bitmaplist_unknown=1,
+        colorspace_id=cs_id, bitmaplist_unknown=1,
     )
 
 
+def make_color_blend_opacity_tlv() -> bytes:
+    """Build a BlendModeAndOpacity TLV for color renditions (opacity=0.0)."""
+    blend_data = struct.pack("<If", 0, 0.0)
+    return struct.pack("<II", 0x03EC, len(blend_data)) + blend_data
+
+
 def build_color_csi(name: str, red: float, green: float, blue: float,
-                    alpha: float, colorspace_id: int = 0) -> bytes:
+                    alpha: float, colorspace_id: int = 1) -> bytes:
     """Build a CSI for a color rendition (layout 1009)."""
     # Color rendition data: COLR tag + version + colorspace + count + components
-    colr = struct.pack("<4sI", b"RLOC", 0)  # 'COLR' as LE
-    colr += struct.pack("<I", colorspace_id & 0xFF)  # colorspace byte
+    colr = struct.pack("<4sI", b"RLOC", 1)  # 'COLR' as LE, version=1
+    colr += struct.pack("<I", colorspace_id & 0xFF)  # colorspace byte (1=sRGB)
     colr += struct.pack("<I", 4)  # number of components (RGBA)
+    # Values are already at the precision Apple's actool produces;
+    # _parse_color_component applies float32 casts where appropriate.
     colr += struct.pack("<4d", red, green, blue, alpha)
 
-    tlv = make_blend_opacity_tlv()
+    tlv = make_color_blend_opacity_tlv()
     tlv += make_exif_orientation_tlv()
 
     return build_csi(
@@ -400,7 +443,8 @@ def build_color_csi(name: str, red: float, green: float, blue: float,
         pixel_format=b"\x00\x00\x00\x00",
         layout=LAYOUT_COLOR, name=name,
         tlv_data=tlv, rendition_data=colr,
-        colorspace_id=colorspace_id,
+        colorspace_id=0,  # CSI header always 0 for colors; COLR has the real cs
+        bitmaplist_unknown=1,
     )
 
 
@@ -447,14 +491,6 @@ def build_data_csi(name: str, raw_data: bytes) -> bytes:
     )
 
 
-def _hash_name(name: str) -> int:
-    """Hash a name to a 16-bit identifier (used for facet IDs and locale IDs)."""
-    h = 0
-    for c in name:
-        h = (h * 31 + ord(c)) & 0xFFFF
-    return h
-
-
 @dataclass
 class Rendition:
     """A single rendition (image/asset) in the CAR file."""
@@ -471,7 +507,8 @@ class Rendition:
     dim1: int = 0
     dim2: int = 0
     appearance: int = 0
-    is_template: bool = False
+    is_template: bool = False  # Deprecated, use template_rendering_intent
+    template_rendering_intent: int = -1  # bitmapEncoding: -1=auto, 0=original, 4=automatic, 2=template
     colorspace_id: int = 1
     locale: str = ""  # Empty = non-localized, "en"/"fr"/etc = localized
     sprite_atlas_id: int = 0  # Non-zero = belongs to a sprite atlas
@@ -510,12 +547,14 @@ class Rendition:
             if self.pixel_data:
                 tlv += make_bytes_per_row_tlv(self.width, self.pixel_format)
 
-        # Build rendition data — pad rows to 32-byte alignment
+        # Build rendition data — pad rows to match aligned_bytes_per_row.
+        # CoreUI always reads rows at 4-bpp stride regardless of pixel format,
+        # so GA8 (2 bpp) rows must be padded to the 4-bpp aligned stride.
         rend_data = b""
         if self.pixel_data:
             pixel_data = self.pixel_data
-            bpp = 4 if self.pixel_format == b"BGRA" else 2
-            exact_bpr = self.width * bpp
+            actual_bpp = 4 if self.pixel_format == b"BGRA" else 2
+            exact_bpr = self.width * actual_bpp
             aligned_bpr = aligned_bytes_per_row(self.width, self.pixel_format)
             if aligned_bpr != exact_bpr and self.width > 0 and self.height > 0:
                 padded = bytearray()
@@ -525,15 +564,30 @@ class Rendition:
                     padded.extend(pixel_data[start:start + exact_bpr])
                     padded.extend(b'\x00' * pad)
                 pixel_data = bytes(padded)
+            # GA8 inline images use DMP2 ver=0; BGRA inline uses LZFSE
+            use_dmp2 = self.pixel_format == b" 8AG"
             rend_data = compress_data(pixel_data, self.pixel_format,
                                       self.width, self.height,
                                       min_deploy=self.min_deploy,
-                                      platform=self.platform)
+                                      platform=self.platform,
+                                      allow_dmp2=use_dmp2,
+                                      dmp2_inline=True)
 
-        flags = 0
-        if self.is_template:
-            flags |= (1 << 1)  # isVectorBased used for template? Actually no.
-            # Template rendering is handled by the facet, not flags.
+        # Template rendering intent → bitmapEncoding field (bits 2-5):
+        #   0 (0x00) = original,  4 (0x10) = automatic,  2 (0x08) = template
+        # Resolve intent: explicit template_rendering_intent takes priority,
+        # then legacy is_template bool, then default = automatic (4).
+        intent = self.template_rendering_intent
+        if intent < 0:  # auto-detect from is_template / default
+            intent = 2 if self.is_template else 4
+        flags = intent << 2
+
+        # isOpaque flag (bit 1): set if all alpha values are 255
+        if self.pixel_data and self.width > 0 and self.height > 0:
+            is_opaque = _check_opaque(self.pixel_data, self.pixel_format,
+                                      self.width, self.height)
+            if is_opaque:
+                flags |= 0x02
 
         return build_csi(
             width=self.width,
@@ -569,8 +623,8 @@ def build_multisize_rendition(name: str, identifier: int,
         msis_entries += struct.pack("<III", e.width, e.height, e.index)
     msis_data = struct.pack("<4sII", b"SISM", 1, len(entries)) + msis_entries
 
-    # TLV for multisize: just blend/opacity
-    tlv = make_blend_opacity_tlv()
+    # TLV for multisize: blend with opacity=0 (no pixel data) + exif
+    tlv = make_color_blend_opacity_tlv()
     tlv += make_exif_orientation_tlv()
 
     rend = Rendition(
@@ -584,6 +638,7 @@ def build_multisize_rendition(name: str, identifier: int,
         layout=LAYOUT_MULTISIZE_IMAGE,
         pixel_format=b"\x00\x00\x00\x00",
         colorspace_id=0,
+        template_rendering_intent=0,  # Icons are always original
     )
     # Override the CSI build
     rend._csi_override = build_csi(
@@ -594,5 +649,6 @@ def build_multisize_rendition(name: str, identifier: int,
         tlv_data=tlv,
         rendition_data=msis_data,
         colorspace_id=0,
+        bitmaplist_unknown=1,
     )
     return rend

@@ -30,7 +30,7 @@ class TestAssetutilValidation(unittest.TestCase):
                         info_plist_path=os.path.join(outdir, "Info.plist"))
         result = run_assetutil(os.path.join(outdir, "Assets.car"))
         self.assertIsNotNone(result, "assetutil returned no output")
-        self.assertEqual(len(result), 58)  # 1 header + 57 renditions
+        self.assertEqual(len(result), 63)  # 1 header + 62 renditions
 
     def test_asset_types(self):
         """Check asset type counts match expectations."""
@@ -47,9 +47,9 @@ class TestAssetutilValidation(unittest.TestCase):
             types[t] = types.get(t, 0) + 1
 
         self.assertEqual(types.get("Icon Image", 0), 10)
-        self.assertEqual(types.get("Image", 0), 40)
+        self.assertEqual(types.get("Image", 0), 42)
         self.assertEqual(types.get("MultiSized Image", 0), 1)
-        self.assertEqual(types.get("PackedImage", 0), 6)
+        self.assertEqual(types.get("PackedImage", 0), 7)
 
     def test_no_icon_catalog(self):
         """Catalog without app icon."""

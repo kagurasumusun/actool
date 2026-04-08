@@ -296,17 +296,18 @@ class TestCarDmp2Layout(unittest.TestCase):
 
     @unittest.skipUnless(deepmap2.is_available(),
                          "vImage deepmap2 encoder not available")
-    def test_standalone_icons_use_lzfse_at_11_0(self):
-        """Layout 12 (standalone) renditions use LZFSE, not DMP2, at 11.0."""
+    def test_standalone_bgra_use_lzfse_at_11_0(self):
+        """BGRA standalone (layout 12) renditions use LZFSE, not DMP2."""
         entries = self._compile_and_parse("11.0")
-        standalone = [e for e in entries
-                      if e['layout'] == LAYOUT_ONE_PART_SCALE
-                      and 'celm_comp' in e]
-        self.assertGreater(len(standalone), 0,
-                           "No standalone image renditions found")
-        for e in standalone:
+        standalone_bgra = [e for e in entries
+                           if e['layout'] == LAYOUT_ONE_PART_SCALE
+                           and 'celm_comp' in e
+                           and e.get('pixel_format') == b"BGRA"]
+        self.assertGreater(len(standalone_bgra), 0,
+                           "No standalone BGRA renditions found")
+        for e in standalone_bgra:
             self.assertNotEqual(e['celm_comp'], 11,
-                                f"{e['name']}: standalone icon should not use "
+                                f"{e['name']}: standalone BGRA should not use "
                                 f"DMP2, got comp={e['celm_comp']}")
 
     def test_no_dmp2_at_10_15(self):
@@ -335,29 +336,37 @@ class TestCarDmp2Layout(unittest.TestCase):
 
         for e in dmp2_entries:
             payload = e['celm_payload']
-            # Sub-header: version(4) + pixfmt(4) + dmp2_len(4) + zero(4)
-            self.assertGreaterEqual(len(payload), 16,
-                                    f"{e['name']}: payload too short")
-            sub_ver, sub_pf, sub_len, sub_zero = struct.unpack_from(
-                '<IIII', payload, 0)
-            self.assertEqual(sub_ver, 1,
-                             f"{e['name']}: sub-header version={sub_ver}")
-            self.assertEqual(sub_zero, 0,
-                             f"{e['name']}: sub-header padding={sub_zero}")
-            self.assertEqual(len(payload), 16 + sub_len,
-                             f"{e['name']}: sub_len mismatch")
+            celm_ver = e.get('celm_ver', 2)
 
-            # DMP2 data starts with "dmp2" magic
-            dmp2_data = payload[16:]
-            self.assertTrue(dmp2_data.startswith(b"dmp2"),
-                            f"{e['name']}: missing dmp2 magic, "
-                            f"got {dmp2_data[:4]!r}")
+            if celm_ver == 0:
+                # Inline DMP2: raw dmp2 data without sub-header
+                self.assertTrue(payload.startswith(b"dmp2"),
+                                f"{e['name']}: inline DMP2 missing dmp2 magic, "
+                                f"got {payload[:4]!r}")
+            else:
+                # Atlas DMP2: sub-header + dmp2 data
+                self.assertGreaterEqual(len(payload), 16,
+                                        f"{e['name']}: payload too short")
+                sub_ver, sub_pf, sub_len, sub_zero = struct.unpack_from(
+                    '<IIII', payload, 0)
+                self.assertEqual(sub_ver, 1,
+                                 f"{e['name']}: sub-header version={sub_ver}")
+                self.assertEqual(sub_zero, 0,
+                                 f"{e['name']}: sub-header padding={sub_zero}")
+                self.assertEqual(len(payload), 16 + sub_len,
+                                 f"{e['name']}: sub_len mismatch")
 
-            # Pixel format in dmp2 header matches sub-header
-            dmp2_pf = dmp2_data[7]
-            self.assertEqual(dmp2_pf, sub_pf,
-                             f"{e['name']}: dmp2 pf={dmp2_pf} != "
-                             f"sub-header pf={sub_pf}")
+                # DMP2 data starts with "dmp2" magic
+                dmp2_data = payload[16:]
+                self.assertTrue(dmp2_data.startswith(b"dmp2"),
+                                f"{e['name']}: missing dmp2 magic, "
+                                f"got {dmp2_data[:4]!r}")
+
+                # Pixel format in dmp2 header matches sub-header
+                dmp2_pf = dmp2_data[7]
+                self.assertEqual(dmp2_pf, sub_pf,
+                                 f"{e['name']}: dmp2 pf={dmp2_pf} != "
+                                 f"sub-header pf={sub_pf}")
 
     @unittest.skipUnless(deepmap2.is_available(),
                          "vImage deepmap2 encoder not available")

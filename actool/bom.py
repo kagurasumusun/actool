@@ -59,7 +59,7 @@ class BOMWriter:
 
         if len(leaf_nodes) == 1:
             # Single leaf node - simple case
-            node_data = self._build_leaf_node(leaf_nodes[0], 0, 0)
+            node_data = self._build_leaf_node(leaf_nodes[0], 0, 0, block_size)
             node_idx = self.add_block(node_data)
             tree_header = struct.pack(">4sIIIIBII", b"tree", 1, node_idx,
                                       block_size, len(entries), 0, 0, 0)
@@ -78,7 +78,7 @@ class BOMWriter:
         for i, batch in enumerate(leaf_nodes):
             fwd = leaf_indices[i + 1] if i + 1 < len(leaf_indices) else 0
             bwd = leaf_indices[i - 1] if i > 0 else 0
-            node_data = self._build_leaf_node(batch, fwd, bwd)
+            node_data = self._build_leaf_node(batch, fwd, bwd, block_size)
             # Replace the placeholder block
             self._blocks[leaf_indices[i]] = node_data
 
@@ -101,13 +101,30 @@ class BOMWriter:
         return tree_idx
 
     def _build_leaf_node(self, entries: list[tuple[bytes, bytes]],
-                         forward: int, backward: int) -> bytes:
-        """Build a leaf node from entries."""
+                         forward: int, backward: int,
+                         block_size: int = 4096) -> bytes:
+        """Build a leaf node from entries.
+
+        Apple's BOM trees embed key data inline in the leaf node.  The layout
+        is: header + entry pairs + padding to *block_size* + inline key data
+        appended AFTER the block_size boundary.  The CoreUI tree reader reads
+        block_size bytes for the entry section, then reads inline keys starting
+        at offset block_size.  Getting this wrong causes value lookups to
+        return garbage (e.g. garbled color components or multisize descriptors).
+        """
         node = struct.pack(">HHII", 1, len(entries), forward, backward)
+        key_data_list = []
         for key_data, value_data in entries:
             val_idx = self.add_block(value_data)
             key_idx = self.add_block(key_data)
             node += struct.pack(">II", val_idx, key_idx)
+            key_data_list.append(key_data)
+        # Pad entry section to exactly block_size
+        if len(node) < block_size:
+            node += b"\x00" * (block_size - len(node))
+        # Append inline key data AFTER the block_size boundary
+        for kd in key_data_list:
+            node += kd
         return node
 
     def add_raw_key_tree(self, name: str,
