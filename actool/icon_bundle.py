@@ -133,9 +133,10 @@ def _find_source_image(bundle_path: Path, icon_json: dict) -> str:
 def _build_icon_car(car_path: str, icon_name: str, icon_images: list,
                     src_img, platform: str, min_deploy: str):
     """Build a CAR file from icon images."""
-    from .catalog import load_image_as_bgra, _hash_name
+    from .catalog import load_image_as_bgra
+    from .name_hash import hash_name
 
-    ident = _hash_name(icon_name)
+    ident = hash_name(icon_name)
     renditions = []
 
     # Create renditions for each icon size

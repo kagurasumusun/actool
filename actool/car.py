@@ -7,8 +7,9 @@ asset catalog data. All CAR-internal structures use little-endian byte order.
 
 import struct
 import uuid
-import zlib
 from dataclasses import dataclass, field
+
+from .name_hash import hash_name as _hash_name
 
 try:
     import liblzfse as lzfse
@@ -488,16 +489,6 @@ def build_data_csi(name: str, raw_data: bytes) -> bytes:
         tlv_data=tlv, rendition_data=rawd,
         bitmaplist_unknown=1,
     )
-
-
-def _hash_name(name: str) -> int:
-    """Hash a name to a 16-bit identifier (used for facet IDs and locale IDs).
-
-    The specific value isn't significant for CoreUI — only that the same
-    name always maps to the same id. We fold a CRC32 of the UTF-8 bytes
-    down to 16 bits.
-    """
-    return (zlib.crc32(name.encode("utf-8")) & 0xFFFF) or 1
 
 
 @dataclass

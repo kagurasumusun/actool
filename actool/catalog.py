@@ -7,13 +7,13 @@ Reads .xcassets directories and produces Rendition objects for compilation.
 import json
 import os
 import struct
-import zlib
 from pathlib import Path
 from typing import Optional
 
 from PIL import Image
 
 from . import car
+from .name_hash import hash_name as _hash_name
 
 
 # Icon point size -> dim2 mapping for macOS app icons
@@ -34,16 +34,6 @@ MACOS_ICON_SIZES = [
     (256, 1), (256, 2),
     (512, 1), (512, 2),
 ]
-
-
-def _hash_name(name: str) -> int:
-    """Generate a deterministic 16-bit identifier from a name.
-
-    The exact value isn't significant for CoreUI — only that the same
-    name always maps to the same id. We fold a CRC32 of the UTF-8 bytes
-    down to 16 bits.
-    """
-    return (zlib.crc32(name.encode("utf-8")) & 0xFFFF) or 1
 
 
 def load_image_as_bgra(path: str) -> tuple[bytes, int, int, bytes]:
