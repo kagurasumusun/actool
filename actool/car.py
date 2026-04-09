@@ -307,11 +307,17 @@ def compress_data(pixel_data: bytes, pixel_format: bytes,
                   dmp2_inline: bool = False) -> bytes:
     """Compress pixel data and return the rendition payload (CELM block).
 
-    Compression selection:
-    - macOS >= 11.0 with allow_dmp2: deepmap2 (comp=11) via vImage
-    - macOS >= 10.11 with liblzfse: KCBC-chunked lzfse (comp=4)
-    - Older / fallback: zip (comp=2, gzip format) for data > 256 bytes
-    - Small data: uncompressed (comp=0)
+    Compression selection (matching system actool behaviour):
+    - macOS >= 11.0 with allow_dmp2: DMP2 via vImage
+      - dmp2_inline=True: CELM ver=0, raw DMP2 (for inline images)
+      - dmp2_inline=False: CELM ver=0 or ver=2 with sub-header
+        (Apple's actool uses ver=0 for newer macOS deployment targets,
+        ver=2 for older.  We use ver=0 for macOS >= 13.0.)
+    - macOS >= 10.11: LZFSE (CELM ver=2, comp=4)
+    - Older: Uncompressed (CELM ver=1, comp=0)
+
+    Important: CELM ver=1 comp=4 crashes CoreUI ('Can't find the correct
+    chunk'). LZFSE requires CELM ver=2.
     """
     from . import deepmap2
 
@@ -323,8 +329,14 @@ def compress_data(pixel_data: bytes, pixel_format: bytes,
         if deploy_ver >= dmp2_min and len(pixel_data) > 256:
             dmp2_data = deepmap2.encode(pixel_data, pixel_format, width, height)
             if dmp2_data is not None:
+                # macOS 13+ uses CELM ver=0 envelope; older targets use ver=2.
+                if platform == "macosx" and deploy_ver >= (13, 0):
+                    celm_ver = 0
+                else:
+                    celm_ver = 2
                 return deepmap2.make_celm_dmp2(dmp2_data, pixel_format,
-                                               inline=dmp2_inline)
+                                               inline=dmp2_inline,
+                                               celm_version=celm_ver)
 
     # KCBC-chunked LZFSE (CELM ver=1, comp=4) for targets >= 10.11.
     # The pixel data is split into 3 equal chunks (plus a remainder

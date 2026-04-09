@@ -153,15 +153,19 @@ def encode(pixel_data: bytes, pixel_format: bytes,
 
 
 def make_celm_dmp2(dmp2_data: bytes, pixel_format: bytes,
-                   inline: bool = False) -> bytes:
+                   inline: bool = False,
+                   celm_version: int = 2) -> bytes:
     """Wrap raw dmp2 data in a CELM comp=11 envelope.
-
-    For packed atlas textures (inline=False): uses CELM ver=2 with a
-    16-byte sub-header between the CELM header and the dmp2 payload:
-        [version=1(4)][deepmap2_pixfmt(4)][dmp2_len(4)][zero(4)]
 
     For inline images (inline=True): uses CELM ver=0 with raw dmp2
     data directly after the CELM header (no sub-header).
+
+    For packed atlas textures (inline=False): uses a 16-byte
+    sub-header between the CELM header and the dmp2 payload:
+        [version=1(4)][deepmap2_pixfmt(4)][dmp2_len(4)][zero(4)]
+    The CELM version is selectable: Apple's actool uses ver=0 for
+    GA8 atlases on macOS 14+ deployment targets, and ver=2 for older
+    deployment targets. Default is ver=0.
     """
     if inline:
         celm = struct.pack("<4sIII", b"MLEC", 0, 11, len(dmp2_data))
@@ -175,8 +179,8 @@ def make_celm_dmp2(dmp2_data: bytes, pixel_format: bytes,
     total_payload = sub_header + dmp2_data
     total_len = len(total_payload)
 
-    # CELM header: "MLEC" + ver=0 + comp=11 + total_payload_len
-    # The system actool uses ver=0 for packed atlas DMP2 (with sub-header),
-    # not ver=2. Ver=2 causes CoreUI to misinterpret the pixel data.
-    celm = struct.pack("<4sIII", b"MLEC", 0, 11, total_len)
+    # CELM header: "MLEC" + ver=celm_version + comp=11 + total_payload_len
+    # Apple's actool uses ver=0 for GA8 atlases on macOS 14+ deployment
+    # targets, and ver=2 for older deployment targets.
+    celm = struct.pack("<4sIII", b"MLEC", celm_version, 11, total_len)
     return celm + total_payload

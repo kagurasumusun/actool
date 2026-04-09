@@ -62,9 +62,11 @@ class Atlas:
 
     @property
     def bytes_per_row(self) -> int:
-        """Row stride in bytes, aligned to 32 bytes.
+        """Row stride in bytes for the encoded buffer, aligned to 32 bytes.
 
-        Uses the native bytes-per-pixel for the pixel format.
+        Uses the actual bytes-per-pixel of the atlas format (4 for BGRA,
+        2 for GA8). vImage's deepmap2 encoder reads `width * pixel_size`
+        bytes per row at this stride.
         """
         bpp = 4 if self.pixel_format == b"BGRA" else 2
         exact = self.width * bpp
@@ -73,9 +75,15 @@ class Atlas:
     def render(self):
         """Render all packed images into a single atlas pixel buffer.
 
-        Rows are padded to 32-byte alignment. The buffer uses top-down row
-        order; the INLK y coordinates are flipped to bottom-left origin
-        separately by the compiler.
+        Rows are padded to 32-byte alignment to match the encoder's
+        expected stride. The buffer uses top-down row order; the INLK
+        y coordinates are flipped to bottom-left origin separately by
+        the compiler.
+
+        Sub-images are placed at byte offsets matching the atlas's
+        actual bytes-per-pixel (2 for GA8, 4 for BGRA), not at a fixed
+        4-bpp positioning. This keeps the GA8 atlas consistent so that
+        vImage encodes the full pixel content.
         """
         bpp = 4 if self.pixel_format == b"BGRA" else 2
         bpr = self.bytes_per_row
