@@ -456,3 +456,147 @@ class TestPdfImagesets(unittest.TestCase):
                             "RAWD payload should contain the PDF")
         finally:
             shutil.rmtree(tmpdir)
+
+
+def _make_iconset(parent_dir, name, sizes=None):
+    """Create a .iconset directory with icon_WxH[@2x].png files.
+
+    sizes: list of point sizes (default: [16, 32, 128, 256, 512]).
+    Each size produces a 1x and 2x PNG.
+    """
+    if sizes is None:
+        sizes = [16, 32, 128, 256, 512]
+    iset = os.path.join(parent_dir, f"{name}.iconset")
+    os.makedirs(iset, exist_ok=True)
+    for pt in sizes:
+        for scale in (1, 2):
+            px = pt * scale
+            suffix = f"@{scale}x" if scale > 1 else ""
+            fname = f"icon_{pt}x{pt}{suffix}.png"
+            # Use a distinct colour per size so pixels are verifiable
+            color = ((pt * 7) % 256, (pt * 13) % 256, 50, 255)
+            Image.new("RGBA", (px, px), color).save(
+                os.path.join(iset, fname))
+    return iset
+
+
+class TestIconset(unittest.TestCase):
+    """The .iconset directory format must produce the same rendition
+    structure as .appiconset: a multisize descriptor plus individual
+    icon renditions with the correct dim2 values.
+
+    Regression: .iconset directories were silently ignored, causing all
+    document-type icons to be missing from the compiled car file.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="actool_iconset_")
+        self.catalog = os.path.join(self.tmpdir, "Test.xcassets")
+        os.makedirs(self.catalog)
+        import json
+        with open(os.path.join(self.catalog, "Contents.json"), "w") as f:
+            json.dump({"info": {"author": "xcode", "version": 1}}, f)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def test_iconset_produces_renditions(self):
+        """An .iconset directory produces a multisize + icon renditions."""
+        _make_iconset(self.catalog, "MyDoc")
+        outdir = os.path.join(self.tmpdir, "out")
+        compile_catalog(self.catalog, outdir, "macosx", "11.0")
+        car = os.path.join(outdir, "Assets.car")
+        self.assertTrue(os.path.isfile(car))
+        info = parse_car_info(car)
+        lc = info["layout_counts"]
+        self.assertGreater(lc.get(1010, 0), 0,
+                           "Should have a multisize rendition")
+
+    def test_iconset_facet_created(self):
+        """The iconset name appears as a facet in the car file."""
+        _make_iconset(self.catalog, "MyDoc")
+        outdir = os.path.join(self.tmpdir, "out")
+        compile_catalog(self.catalog, outdir, "macosx", "11.0")
+        csi = parse_car_csi_by_name(os.path.join(outdir, "Assets.car"))
+        # The multisize rendition should exist with the iconset name
+        self.assertIn("MyDoc", csi,
+                      "Multisize rendition named after iconset")
+
+    def test_iconset_correct_dim2_values(self):
+        """Each icon size maps to the correct dim2 index."""
+        from actool.catalog import ICON_DIM2_MAP
+        _make_iconset(self.catalog, "MyDoc")
+        outdir = os.path.join(self.tmpdir, "out")
+        compile_catalog(self.catalog, outdir, "macosx", "11.0")
+        csi = parse_car_csi_by_name(os.path.join(outdir, "Assets.car"))
+
+        # Check multisize entry lists all expected sizes
+        ms_entry = csi["MyDoc"][0]
+        self.assertEqual(ms_entry["layout"], 1010)
+
+        # Check that icon renditions exist for each size/scale
+        for point_w, expected_dim2 in ICON_DIM2_MAP.items():
+            fname = f"icon_{point_w}x{point_w}.png"
+            self.assertIn(fname, csi,
+                          f"Missing icon rendition for {point_w}pt")
+
+    def test_iconset_rendition_count(self):
+        """5 sizes × 2 scales = 10 icon renditions + 1 multisize + atlases."""
+        _make_iconset(self.catalog, "MyDoc")
+        outdir = os.path.join(self.tmpdir, "out")
+        compile_catalog(self.catalog, outdir, "macosx", "11.0")
+        info = parse_car_info(car_path=os.path.join(outdir, "Assets.car"))
+        lc = info["layout_counts"]
+        # 10 icon images: small ones packed (1003), large ones inline (12)
+        self.assertEqual(lc.get(1003, 0) + lc.get(12, 0), 10)
+        # 1 multisize descriptor
+        self.assertEqual(lc.get(1010, 0), 1)
+
+    def test_iconset_in_group_directory(self):
+        """Iconsets inside a group subdirectory are found."""
+        group = os.path.join(self.catalog, "DocIcons")
+        os.makedirs(group)
+        import json
+        with open(os.path.join(group, "Contents.json"), "w") as f:
+            json.dump({"info": {"author": "xcode", "version": 1}}, f)
+        _make_iconset(group, "doc_mp4")
+        outdir = os.path.join(self.tmpdir, "out")
+        compile_catalog(self.catalog, outdir, "macosx", "11.0")
+        csi = parse_car_csi_by_name(os.path.join(outdir, "Assets.car"))
+        self.assertIn("doc_mp4", csi)
+
+    def test_iconset_partial_sizes(self):
+        """An iconset with only some sizes still compiles."""
+        _make_iconset(self.catalog, "Small", sizes=[16, 32])
+        outdir = os.path.join(self.tmpdir, "out")
+        compile_catalog(self.catalog, outdir, "macosx", "11.0")
+        car = os.path.join(outdir, "Assets.car")
+        info = parse_car_info(car)
+        lc = info["layout_counts"]
+        # 2 sizes × 2 scales = 4 icons + 1 multisize
+        self.assertEqual(lc.get(1003, 0) + lc.get(12, 0), 4)
+        self.assertEqual(lc.get(1010, 0), 1)
+
+    @unittest.skipUnless(has_extract_pixels(), "extract_pixels not built")
+    def test_iconset_pixels_roundtrip(self):
+        """Icon images from an iconset extract with correct pixels."""
+        # Use a distinctive colour for 32pt icons
+        iset = os.path.join(self.catalog, "TestIcon.iconset")
+        os.makedirs(iset)
+        color = (200, 100, 50, 255)
+        Image.new("RGBA", (32, 32), color).save(
+            os.path.join(iset, "icon_32x32.png"))
+        Image.new("RGBA", (64, 64), color).save(
+            os.path.join(iset, "icon_32x32@2x.png"))
+
+        outdir = os.path.join(self.tmpdir, "out")
+        compile_catalog(self.catalog, outdir, "macosx", "11.0")
+        car = os.path.join(outdir, "Assets.car")
+        ext = os.path.join(self.tmpdir, "ext")
+        os.makedirs(ext)
+        result = extract_car_image(car, "TestIcon", ext)
+        self.assertIn(1, result, "1x icon should be extractable")
+        w, h, pixels = result[1]
+        self.assertEqual((w, h), (32, 32))
+        # RGBA: check R channel (premultiplied, but alpha=255 so same)
+        self.assertEqual(pixels[0], 200)

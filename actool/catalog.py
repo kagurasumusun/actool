@@ -232,6 +232,9 @@ class AssetCatalog:
             elif item.suffix == ".appiconset":
                 self._parse_appiconset(item, renditions, facets)
 
+            elif item.suffix == ".iconset":
+                self._parse_iconset(item, renditions, facets)
+
             elif item.suffix == ".colorset":
                 self._parse_colorset(item, renditions, facets)
 
@@ -402,6 +405,78 @@ class AssetCatalog:
         ms_entries = []
         seen_point_sizes = set()
         for rend, point_w, pixel_size in icon_renditions:
+            if point_w not in seen_point_sizes:
+                dim2 = ICON_DIM2_MAP.get(point_w, 0)
+                ms_entries.append(car.MultisizeImageEntry(
+                    width=point_w,
+                    height=point_w,
+                    index=dim2,
+                ))
+                seen_point_sizes.add(point_w)
+
+        ms_rend = car.build_multisize_rendition(name, ident, ms_entries)
+        renditions.append(ms_rend)
+
+        facets[name] = (car.ELEMENT_UNIVERSAL, car.PART_ICON, ident)
+
+    def _parse_iconset(self, item: Path, renditions: list, facets: dict):
+        """Parse an .iconset directory (document type icons).
+
+        Unlike .appiconset, .iconset has no Contents.json — icon images
+        follow the naming convention icon_{W}x{H}[@{scale}x].png.
+        All .iconset directories are processed (no --app-icon gate).
+        """
+        import re
+        name = item.stem
+        ident = self._get_identifier(name)
+
+        icon_renditions = []
+        pattern = re.compile(
+            r'^icon_(\d+)x(\d+)(?:@(\d+)x)?\.png$')
+
+        for img_file in sorted(item.iterdir()):
+            if not img_file.is_file():
+                continue
+            m = pattern.match(img_file.name)
+            if not m:
+                continue
+
+            point_w = int(m.group(1))
+            scale = int(m.group(3)) if m.group(3) else 1
+
+            if self.platform == "macosx" and scale > 2:
+                continue
+
+            pixel_data, width, height, pixel_format = load_image_as_bgra(
+                str(img_file), force_bgra=self._force_bgra)
+
+            dim2 = ICON_DIM2_MAP.get(point_w, 0)
+
+            rend = car.Rendition(
+                name=img_file.name,
+                identifier=ident,
+                element=car.ELEMENT_UNIVERSAL,
+                part=car.PART_ICON,
+                scale=scale,
+                width=width,
+                height=height,
+                pixel_data=pixel_data,
+                pixel_format=pixel_format,
+                layout=car.LAYOUT_ONE_PART_SCALE,
+                dim2=dim2,
+                template_rendering_intent=0,
+                colorspace_id=2 if pixel_format == b" 8AG" else 1,
+            )
+            renditions.append(rend)
+            icon_renditions.append((rend, point_w))
+
+        if not icon_renditions:
+            return
+
+        # Add multisize image rendition
+        ms_entries = []
+        seen_point_sizes = set()
+        for rend, point_w in icon_renditions:
             if point_w not in seen_point_sizes:
                 dim2 = ICON_DIM2_MAP.get(point_w, 0)
                 ms_entries.append(car.MultisizeImageEntry(
