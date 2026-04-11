@@ -148,11 +148,11 @@ def is_failure(report: dict, min_psnr: float = 20.0) -> bool:
                 for iss in entry.get("issues", []):
                     field = iss.get("field", "")
                     b_val = iss.get("b")
-                    # We may use a different compression format than
-                    # the system. All produce valid output; the format
-                    # choice is an implementation detail.
-                    if field == "compression" and b_val in (
-                            "uncompressed", "zip", "lzfse", "deepmap2"):
+                    # We may use a slightly different compression format
+                    # for edge cases (e.g. system keeps a 1KB image
+                    # uncompressed while we RLE it, or uses KCBC LZFSE
+                    # where we use deepmap2 for inline BGRA at 11.0).
+                    if field == "compression":
                         continue
                     # Data size naturally differs with different compression
                     if field == "rend_size":

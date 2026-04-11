@@ -1528,3 +1528,121 @@ class TestEmptyColorset(unittest.TestCase):
                              "Empty colorset should not create a facet")
         finally:
             shutil.rmtree(tmpdir)
+
+
+class TestRleCompression(unittest.TestCase):
+    """RLE compression (comp=1) for small pre-LZFSE images.
+
+    The system actool uses RLE for images with raw size between ~1KB and
+    ~4KB, and zip for larger images. The RLE format stores per-row data
+    with run-length encoding of pixel values.
+    """
+
+    def _compile_and_check(self, width, height, deploy="10.9"):
+        """Compile a single image and return (comp, payload_bytes)."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_rle_")
+        try:
+            img = Image.new("RGBA", (width, height), (0, 0, 0, 102))
+            # Draw a pattern so RLE has something to encode
+            for y in range(height // 3, 2 * height // 3):
+                for x in range(width // 3, 2 * width // 3):
+                    img.putpixel((x, y), (255, 255, 255, 255))
+            catalog = _make_catalog_with_image(tmpdir, "Img", img)
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", deploy)
+            csi = parse_car_csi_by_name(os.path.join(outdir, "Assets.car"))
+            entry = csi["Img.png"][0]
+            rend = entry["rend"]
+            if len(rend) >= 16:
+                comp = struct.unpack_from('<I', rend, 8)[0]
+                payload = rend[16:]
+                return comp, payload
+            return None, None
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_small_image_uses_rle(self):
+        """Image with raw ~2400B uses RLE (comp=1) at 10.9."""
+        # 30x20 BGRA = 2400B raw — in the RLE range
+        comp, _ = self._compile_and_check(30, 20)
+        self.assertEqual(comp, 1, "Small image should use RLE")
+
+    def test_large_image_uses_zip(self):
+        """Image with raw >= 4096B uses zip (comp=2) at 10.9."""
+        # 64x64 BGRA = 16384B raw — in the zip range
+        comp, _ = self._compile_and_check(64, 64)
+        self.assertEqual(comp, 2, "Large image should use zip")
+
+    def test_tiny_image_uncompressed(self):
+        """Image with raw <= 1024B stays uncompressed (comp=0)."""
+        # 16x16 BGRA = 1024B raw
+        comp, _ = self._compile_and_check(16, 16)
+        self.assertEqual(comp, 0, "Tiny image should be uncompressed")
+
+    def test_rle_header_valid(self):
+        """RLE payload has correct bpp, width, height header."""
+        comp, payload = self._compile_and_check(30, 20)
+        self.assertEqual(comp, 1)
+        bpp = struct.unpack_from('<I', payload, 0)[0]
+        pw = struct.unpack_from('<I', payload, 4)[0]
+        ph = struct.unpack_from('<I', payload, 8)[0]
+        self.assertEqual(bpp, 4)
+        self.assertEqual(pw, 30)
+        self.assertEqual(ph, 20)
+
+    def test_rle_decompresses_to_correct_size(self):
+        """RLE row data decompresses to width*bpp bytes per row."""
+        comp, payload = self._compile_and_check(30, 20)
+        self.assertEqual(comp, 1)
+        bpp = struct.unpack_from('<I', payload, 0)[0]
+        pw = struct.unpack_from('<I', payload, 4)[0]
+        ph = struct.unpack_from('<I', payload, 8)[0]
+        offsets = [struct.unpack_from('<I', payload, 12 + i * 4)[0]
+                   for i in range(ph)]
+        unique = sorted(set(offsets))
+        for idx, off in enumerate(unique):
+            end = unique[idx + 1] if idx + 1 < len(unique) else len(payload)
+            block = payload[off:end]
+            # Decode
+            decoded = bytearray()
+            j = 0
+            while j + 4 <= len(block):
+                count = struct.unpack_from('<H', block, j)[0]
+                flags = struct.unpack_from('<H', block, j + 2)[0]
+                if flags & 0x8000:  # run
+                    decoded.extend(block[j+4:j+4+bpp] * count)
+                    j += 4 + bpp
+                else:  # literal
+                    decoded.extend(block[j+4:j+4+count*bpp])
+                    j += 4 + count * bpp
+            self.assertEqual(len(decoded), pw * bpp,
+                             f"Row at offset {off}: decoded {len(decoded)}B "
+                             f"expected {pw * bpp}B")
+
+    @unittest.skipUnless(has_extract_pixels(), "extract_pixels not built")
+    def test_rle_pixels_roundtrip(self):
+        """RLE-compressed image roundtrips through CoreUI correctly."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_rle_rt_")
+        try:
+            # 22x22 pattern that uses RLE
+            img = Image.new("RGBA", (22, 22), (0, 0, 0, 200))
+            for y in range(6, 16):
+                for x in range(6, 16):
+                    img.putpixel((x, y), (100, 50, 25, 200))
+            catalog = _make_catalog_with_image(tmpdir, "Rle", img)
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "10.9")
+            car = os.path.join(outdir, "Assets.car")
+            ext = os.path.join(tmpdir, "ext")
+            os.makedirs(ext)
+            result = extract_car_image(car, "Rle", ext)
+            self.assertIn(1, result)
+            w, h, pixels = result[1]
+            self.assertEqual((w, h), (22, 22))
+            # Check center pixel (premultiplied: R=100*200/255≈78)
+            cx, cy = 11, 11
+            off = (cy * w + cx) * 4
+            a = pixels[off + 3]
+            self.assertEqual(a, 200, f"Center alpha should be 200, got {a}")
+        finally:
+            shutil.rmtree(tmpdir)

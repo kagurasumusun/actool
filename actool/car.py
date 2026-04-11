@@ -188,6 +188,73 @@ _MIN_DMP2_VERSION = {"macosx": (11, 0), "iphoneos": (14, 0),
                       "appletvos": (14, 0), "watchos": (7, 0)}
 
 
+def _compress_rle(pixel_data: bytes, width: int, height: int,
+                  bpp: int = 4) -> bytes:
+    """Compress pixel data using CoreUI's RLE format (comp=1).
+
+    Format:
+      header:  bpp(4) + width(4) + height(4)
+      offsets: h × uint32, absolute byte offset of each row's data block
+      data:    sequence of 8-byte ops per row:
+        run:     count(u16) + 0x8000(u16) + pixel(bpp bytes)
+        literal: count(u16) + 0x0000(u16) + pixels(count × bpp bytes)
+
+    Rows with identical content share the same offset (deduplication).
+    """
+    row_stride = width * bpp
+    header = struct.pack("<III", bpp, width, height)
+
+    # Encode each row, deduplicating identical rows
+    row_data_cache: dict[bytes, int] = {}  # raw_row -> absolute offset
+    row_offsets = []
+    encoded_blocks = bytearray()
+    # Absolute offset of first data byte = header(12) + offsets(h*4)
+    data_base = 12 + height * 4
+
+    for y in range(height):
+        row = pixel_data[y * row_stride:(y + 1) * row_stride]
+        if row in row_data_cache:
+            row_offsets.append(row_data_cache[row])
+            continue
+
+        abs_offset = data_base + len(encoded_blocks)
+        row_data_cache[row] = abs_offset
+        row_offsets.append(abs_offset)
+
+        # RLE-encode this row
+        x = 0
+        while x < width:
+            # Count run of identical pixels
+            px = row[x * bpp:(x + 1) * bpp]
+            run_len = 1
+            while x + run_len < width and \
+                    row[(x + run_len) * bpp:(x + run_len + 1) * bpp] == px:
+                run_len += 1
+
+            if run_len >= 2:
+                # Run op: count + 0x8000 + pixel
+                encoded_blocks += struct.pack("<HH", run_len, 0x8000)
+                encoded_blocks += px
+                x += run_len
+            else:
+                # Literal op: gather non-repeating pixels
+                lit_start = x
+                while x < width:
+                    next_px = row[x * bpp:(x + 1) * bpp]
+                    # Check if next 2+ pixels are a run (worth switching)
+                    if x + 1 < width and \
+                            row[(x + 1) * bpp:(x + 2) * bpp] == next_px:
+                        break
+                    x += 1
+                lit_count = x - lit_start
+                encoded_blocks += struct.pack("<HH", lit_count, 0x0000)
+                encoded_blocks += row[lit_start * bpp:x * bpp]
+
+    # Build the payload
+    offsets_bytes = b"".join(struct.pack("<I", o) for o in row_offsets)
+    return header + offsets_bytes + bytes(encoded_blocks)
+
+
 def _compress_kcbc(pixel_data: bytes, height: int) -> bytes | None:
     """Compress pixel data using KCBC-chunked LZFSE.
 
@@ -273,9 +340,16 @@ def compress_data(pixel_data: bytes, pixel_format: bytes,
             celm = struct.pack("<4sIII", b"MLEC", 1, 4, 3)
             return celm + b"KCBC" + kcbc
 
-    # zip compression (CELM ver=0, comp=2, gzip format) for older
-    # targets or when liblzfse is unavailable.
-    if len(pixel_data) > 256:
+    # RLE (comp=1) for images with raw size in (1024, 4096) bytes,
+    # zip (comp=2) for larger images.  The system actool leaves very
+    # small images (≤ 1024B) uncompressed and uses zip above ~4KB.
+    if len(pixel_data) > 1024 and height > 0:
+        if len(pixel_data) < 4096:
+            bpp = 4 if pixel_format == b"BGRA" else 2
+            rle = _compress_rle(pixel_data, width, height, bpp)
+            if len(rle) < len(pixel_data):
+                celm = struct.pack("<4sIII", b"MLEC", 0, 1, len(rle))
+                return celm + rle
         import zlib
         gz = zlib.compress(pixel_data, wbits=15 + 16)  # gzip format
         if len(gz) < len(pixel_data):
