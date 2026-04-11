@@ -653,10 +653,16 @@ def compare_cars(car_a: dict, car_b: dict, *,
     if do_pixels and _can_extract_pixels():
         # Use facet names (the actual user-facing asset names) for pixel
         # comparison, filtering out internal entries like packed atlas
-        # textures and CoreStructuredImage.
+        # textures, CoreStructuredImage, and app icons (multisize images
+        # whose pixel extraction returns atlas data, not the rendered icon).
+        exclude = {"CoreStructuredImage"}
+        # Find names associated with multisize renditions (app icons)
+        for r in car_a["renditions"] + car_b["renditions"]:
+            if r["layout"] == 1010:  # multisize
+                base = r["name"].split(".")[0].split("@")[0]
+                exclude.add(base)
         common_names = sorted(
-            set(car_a["facets"]) & set(car_b["facets"])
-            - {"CoreStructuredImage"}
+            set(car_a["facets"]) & set(car_b["facets"]) - exclude
         )
 
         if common_names:

@@ -36,30 +36,76 @@ MACOS_ICON_SIZES = [
 ]
 
 
-def load_image_as_bgra(path: str) -> tuple[bytes, int, int, bytes]:
-    """Load an image file and return (pixel_data, width, height, pixel_format)."""
+def _premultiply_bgra(data: bytes) -> bytes:
+    """Premultiply alpha for BGRA pixel data."""
+    buf = bytearray(data)
+    for i in range(0, len(buf) - 3, 4):
+        a = buf[i + 3]
+        if a == 255:
+            continue
+        if a == 0:
+            buf[i] = buf[i + 1] = buf[i + 2] = 0
+        else:
+            buf[i] = (buf[i] * a + 127) // 255
+            buf[i + 1] = (buf[i + 1] * a + 127) // 255
+            buf[i + 2] = (buf[i + 2] * a + 127) // 255
+    return bytes(buf)
+
+
+def _premultiply_ga8(data: bytes) -> bytes:
+    """Premultiply alpha for GA8 (gray+alpha) pixel data."""
+    buf = bytearray(data)
+    for i in range(0, len(buf) - 1, 2):
+        a = buf[i + 1]
+        if a == 255:
+            continue
+        if a == 0:
+            buf[i] = 0
+        else:
+            buf[i] = (buf[i] * a + 127) // 255
+    return bytes(buf)
+
+
+def load_image_as_bgra(path: str,
+                       force_bgra: bool = False,
+                       ) -> tuple[bytes, int, int, bytes]:
+    """Load an image file and return (pixel_data, width, height, pixel_format).
+
+    Pixel data is returned in premultiplied alpha form, matching CoreUI's
+    expected format.
+
+    When force_bgra is True, always return BGRA format even for grayscale
+    images (used for older deployment targets that don't support GA8).
+    """
     img = Image.open(path)
 
     if img.mode == "RGBA":
         r, g, b, a = img.split()
         # Detect grayscale-compatible RGBA (R==G==B) → store as GA8
-        if r.tobytes() == g.tobytes() == b.tobytes():
+        if not force_bgra and r.tobytes() == g.tobytes() == b.tobytes():
             ga = Image.merge("LA", (r, a))
-            return ga.tobytes(), img.width, img.height, b" 8AG"
+            return _premultiply_ga8(ga.tobytes()), img.width, img.height, b" 8AG"
         # Convert RGBA to BGRA
         img = Image.merge("RGBA", (b, g, r, a))
-        pixel_data = img.tobytes()
-        return pixel_data, img.width, img.height, b"BGRA"
+        return _premultiply_bgra(img.tobytes()), img.width, img.height, b"BGRA"
     elif img.mode == "LA" or img.mode == "PA":
+        if force_bgra:
+            img = img.convert("RGBA")
+            r, g, b, a = img.split()
+            img = Image.merge("RGBA", (b, g, r, a))
+            return _premultiply_bgra(img.tobytes()), img.width, img.height, b"BGRA"
         # Grayscale + Alpha -> GA8
         img = img.convert("LA")
-        pixel_data = img.tobytes()
-        return pixel_data, img.width, img.height, b" 8AG"
+        return _premultiply_ga8(img.tobytes()), img.width, img.height, b" 8AG"
     elif img.mode == "L":
-        # Grayscale -> add alpha channel
+        if force_bgra:
+            img = img.convert("RGBA")
+            r, g, b, a = img.split()
+            img = Image.merge("RGBA", (b, g, r, a))
+            return _premultiply_bgra(img.tobytes()), img.width, img.height, b"BGRA"
+        # Grayscale -> add alpha channel (fully opaque, premultiply is no-op)
         img = img.convert("LA")
-        pixel_data = img.tobytes()
-        return pixel_data, img.width, img.height, b" 8AG"
+        return img.tobytes(), img.width, img.height, b" 8AG"
     elif img.mode == "RGB":
         # Add alpha channel, convert to BGRA
         img = img.convert("RGBA")
@@ -127,6 +173,12 @@ class AssetCatalog:
         self._identifiers: dict[str, int] = {}
         self._next_id = 1
         self._locales_used: set[str] = set()
+        # GA8 pixel format is only used with atlas packing (>= 10.11).
+        # Older targets store everything as BGRA.
+        deploy_ver = tuple(int(x) for x in min_deploy.split(".")[:2])
+        min_ga8 = {"macosx": (10, 11), "iphoneos": (9, 0),
+                   "appletvos": (9, 0), "watchos": (2, 0)}
+        self._force_bgra = deploy_ver < min_ga8.get(platform, (10, 11))
 
     def _should_include_locale(self, locale: str) -> bool:
         """Check if a locale should be included based on filtering options.
@@ -246,7 +298,7 @@ class AssetCatalog:
                 self._locales_used.add(locale)
 
             pixel_data, width, height, pixel_format = load_image_as_bgra(
-                str(img_path))
+                str(img_path), force_bgra=self._force_bgra)
 
             rend = car.Rendition(
                 name=filename,
@@ -305,7 +357,7 @@ class AssetCatalog:
                 point_w = 0
 
             pixel_data, width, height, pixel_format = load_image_as_bgra(
-                str(img_path))
+                str(img_path), force_bgra=self._force_bgra)
 
             pixel_size = point_w * scale
             dim2 = ICON_DIM2_MAP.get(point_w, 0)
@@ -473,7 +525,8 @@ class AssetCatalog:
                     scale = int(scale_str.replace("x", ""))
 
                     pixel_data, width, height, pixel_format = \
-                        load_image_as_bgra(str(img_path))
+                        load_image_as_bgra(str(img_path),
+                                           force_bgra=self._force_bgra)
 
                     rend = car.Rendition(
                         name=filename,

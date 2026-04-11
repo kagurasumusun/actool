@@ -207,15 +207,11 @@ def compress_data(pixel_data: bytes, pixel_format: bytes,
                 return deepmap2.make_celm_dmp2(dmp2_data, pixel_format,
                                                inline=dmp2_inline)
 
-    # Fall back to LZFSE
-    lzfse_min = _MIN_LZFSE_VERSION.get(platform, (10, 11))
-    can_lzfse = HAS_LZFSE and deploy_ver >= lzfse_min
-
-    if can_lzfse and len(pixel_data) > 256:
-        compressed = lzfse.compress(pixel_data)
-        if len(compressed) < len(pixel_data):
-            celm = struct.pack("<4sIII", b"MLEC", 2, 4, len(compressed))
-            return celm + compressed
+    # LZFSE compression is disabled because the system actool uses a
+    # chunked KCBC container format that we don't implement. Our raw
+    # LZFSE (CELM ver=2 comp=4) loses the alpha channel when decoded
+    # by CoreUI. For macOS >= 11.0, DMP2 compression (above) is used
+    # instead.
     # Uncompressed fallback
     celm = struct.pack("<4sIII", b"MLEC", 1, 0, len(pixel_data))
     return celm + pixel_data

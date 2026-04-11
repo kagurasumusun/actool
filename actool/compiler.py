@@ -43,8 +43,17 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
                            development_region=development_region)
     renditions, facets = catalog.parse()
 
-    # Group renditions for atlas packing
-    pack_groups, inline_renditions = group_for_packing(renditions)
+    # Group renditions for atlas packing.
+    # The system actool only packs images for deployment targets that support
+    # LZFSE or newer compression (macOS >= 10.11). Older targets store all
+    # images inline.
+    deploy_ver = tuple(int(x) for x in min_deploy.split(".")[:2])
+    min_pack_ver = {"macosx": (10, 11), "iphoneos": (9, 0),
+                    "appletvos": (9, 0), "watchos": (2, 0)}
+    if deploy_ver >= min_pack_ver.get(platform, (10, 11)):
+        pack_groups, inline_renditions = group_for_packing(renditions)
+    else:
+        pack_groups, inline_renditions = [], list(renditions)
 
     # Compute dynamic keyformat: include dim1 if packing produces multiple atlases
     # First do a trial split to count total atlases
