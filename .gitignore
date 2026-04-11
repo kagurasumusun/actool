@@ -13,3 +13,6 @@ _test_output/
 
 # Deciduous database (local)
 .deciduous/
+
+tools/extract_pixels
+tools/validate_car
