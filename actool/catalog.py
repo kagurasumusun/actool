@@ -273,6 +273,7 @@ class AssetCatalog:
         name = item.stem
         facet_name = namespace + name
         ident = self._get_identifier(facet_name)
+        rend_count_before = len(renditions)
 
         contents_path = item / "Contents.json"
         if not contents_path.exists():
@@ -375,7 +376,12 @@ class AssetCatalog:
             )
             renditions.append(rend)
 
-        facets[facet_name] = (car.ELEMENT_UNIVERSAL, car.PART_REGULAR, ident)
+        # Only register the facet if at least one rendition was created.
+        # Empty imagesets (all placeholder entries with no filename) are
+        # skipped by the system actool.
+        if rend_count_before < len(renditions):
+            facets[facet_name] = (car.ELEMENT_UNIVERSAL, car.PART_REGULAR,
+                                  ident)
 
     def _parse_appiconset(self, item: Path, renditions: list, facets: dict):
         """Parse an .appiconset directory."""

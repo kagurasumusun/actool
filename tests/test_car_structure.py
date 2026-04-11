@@ -88,10 +88,12 @@ class TestKeyformat(unittest.TestCase):
         info = self._compile([("Solo", "RGBA")])
         self.assertEqual(info["keyformat_count"], 8)
 
-    def test_dim1_included_with_multiple_packs(self):
-        """Multiple format groups → Dim1 included."""
+    def test_dim1_included_with_multiple_format_groups(self):
+        """Multiple format groups at same scale → Dim1 included."""
         info = self._compile([("A", "RGBA"), ("B", "RGBA"),
                               ("C", "LA"), ("D", "LA")])
+        # 2 groups at scale 1 + 2 groups at scale 2 = 4 atlases, 2 scales
+        # → dim1 needed to distinguish formats within each scale
         self.assertGreaterEqual(info["keyformat_count"], 9)
 
 

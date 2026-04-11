@@ -22,5 +22,9 @@
   {
     "url": "https://github.com/serglit72/Smack.git",
     "paths": [ "Smack/Assets.xcassets" ]
+  },
+  {
+    "url": "https://github.com/eurora-labs/eurora.git",
+    "paths": [ "apps/macos/macos/Assets.xcassets" ]
   }
 ]

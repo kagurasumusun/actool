@@ -1735,3 +1735,117 @@ class TestInlineGa8Deepmap2(unittest.TestCase):
                              f"got {bpr}")
         finally:
             shutil.rmtree(tmpdir)
+
+
+class TestEmptyImagesetNoFacet(unittest.TestCase):
+    """Imagesets with all placeholder entries (no filenames) must not
+    create a facet.
+
+    Regression: empty imagesets created a spurious facet entry, causing
+    a mismatch with the system actool which skips them entirely.
+    """
+
+    def test_no_facet_for_empty_imageset(self):
+        tmpdir = tempfile.mkdtemp(prefix="actool_emptyis_")
+        try:
+            import json
+            catalog = os.path.join(tmpdir, "Test.xcassets")
+            os.makedirs(catalog)
+            with open(os.path.join(catalog, "Contents.json"), "w") as f:
+                json.dump({"info": {"author": "xcode", "version": 1}}, f)
+            # Empty imageset (placeholders only)
+            iset = os.path.join(catalog, "Empty.imageset")
+            os.makedirs(iset)
+            with open(os.path.join(iset, "Contents.json"), "w") as f:
+                json.dump({
+                    "images": [
+                        {"idiom": "universal", "scale": "1x"},
+                        {"idiom": "universal", "scale": "2x"},
+                    ],
+                    "info": {"author": "xcode", "version": 1},
+                }, f)
+            # Real imageset so car is non-empty
+            iset2 = os.path.join(catalog, "Real.imageset")
+            os.makedirs(iset2)
+            Image.new("RGBA", (16, 16), (100, 100, 100, 255)).save(
+                os.path.join(iset2, "Real.png"))
+            with open(os.path.join(iset2, "Contents.json"), "w") as f:
+                json.dump({
+                    "images": [{"filename": "Real.png", "idiom": "mac",
+                                "scale": "1x"}],
+                    "info": {"author": "xcode", "version": 1}}, f)
+
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "11.0")
+            from tests.helpers import _read_car_blocks, _walk_tree_leaves
+            data, blocks, named, read_block = _read_car_blocks(
+                os.path.join(outdir, "Assets.car"))
+            tree = read_block(named["FACETKEYS"])
+            root = struct.unpack('>I', tree[8:12])[0]
+            facet_names = set()
+            for key_bytes, _ in _walk_tree_leaves(read_block, root):
+                facet_names.add(key_bytes.rstrip(b'\x00').decode())
+            self.assertNotIn("Empty", facet_names,
+                             "Empty imageset should not create a facet")
+            self.assertIn("Real", facet_names)
+        finally:
+            shutil.rmtree(tmpdir)
+
+
+class TestDim1Keyformat(unittest.TestCase):
+    """Dim1 token must only be in keyformat when atlas splitting happens.
+
+    Regression: Dim1 was included whenever total_atlas_count > 1, even
+    when each scale had only 1 atlas (e.g., icon-only catalogs with 1
+    atlas per scale). The correct condition is: Dim1 is needed when any
+    scale has more atlases than it would with a single format group.
+    """
+
+    def test_no_dim1_for_single_atlas_per_scale(self):
+        """1 atlas per scale (icon-only catalog) → no Dim1."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_dim1_")
+        try:
+            import json
+            catalog = os.path.join(tmpdir, "Test.xcassets")
+            os.makedirs(catalog)
+            with open(os.path.join(catalog, "Contents.json"), "w") as f:
+                json.dump({"info": {"author": "xcode", "version": 1}}, f)
+            iset = os.path.join(catalog, "AppIcon.appiconset")
+            os.makedirs(iset)
+            imgs = []
+            for pt in [16, 32, 128, 256, 512]:
+                for sc in [1, 2]:
+                    px = pt * sc
+                    fname = f"icon_{pt}x{pt}{'@2x' if sc > 1 else ''}.png"
+                    Image.new("RGBA", (px, px), (50, 50, 50, 255)).save(
+                        os.path.join(iset, fname))
+                    imgs.append({"filename": fname, "idiom": "mac",
+                                 "scale": f"{sc}x", "size": f"{pt}x{pt}"})
+            with open(os.path.join(iset, "Contents.json"), "w") as f:
+                json.dump({"images": imgs, "info": {"author": "xcode",
+                           "version": 1}}, f)
+
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "11.0",
+                            app_icon="AppIcon",
+                            info_plist_path=os.path.join(outdir, "I.plist"))
+            kf = _parse_keyformat(os.path.join(outdir, "Assets.car"))
+            self.assertNotIn(8, kf,
+                             "Dim1 should not be in keyformat for icon-only")
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_dim1_for_mixed_format_groups(self):
+        """Multiple format groups at same scale → Dim1 included."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_dim1m_")
+        try:
+            catalog, _ = make_temp_catalog(
+                [("A", "RGBA"), ("B", "RGBA"),
+                 ("C", "LA"), ("D", "LA")], tmpdir)
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "11.0")
+            kf = _parse_keyformat(os.path.join(outdir, "Assets.car"))
+            self.assertIn(8, kf,
+                          "Dim1 should be in keyformat for mixed formats")
+        finally:
+            shutil.rmtree(tmpdir)

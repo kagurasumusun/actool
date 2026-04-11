@@ -55,17 +55,20 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
     else:
         pack_groups, inline_renditions = [], list(renditions)
 
-    # Compute dynamic keyformat: include dim1 if packing produces multiple atlases
-    # First do a trial split to count total atlases
+    # Compute dynamic keyformat: include dim1 when there are more atlases
+    # than distinct scales (i.e., some scale has > 1 atlas due to format
+    # groups or atlas splitting).
     trial_atlas_count = 0
+    trial_scales = set()
     for fmt, scale, rends in pack_groups:
+        trial_scales.add(scale)
         trial_imgs = [PackedImage(name=r.name, identifier=r.identifier,
                                   width=r.width, height=r.height,
                                   pixel_format=r.pixel_format, scale=r.scale,
                                   part=r.part, dim2=r.dim2)
                       for r in rends]
         trial_atlas_count += len(pack_images_split(trial_imgs, max_width=262))
-    uses_dim1 = trial_atlas_count > 1
+    uses_dim1 = trial_atlas_count > len(trial_scales)
     keyformat_attrs = car.compute_keyformat(renditions, force_dim1=uses_dim1)
 
     # Set keyformat and deployment info on all renditions

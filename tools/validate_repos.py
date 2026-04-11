@@ -142,18 +142,21 @@ def is_failure(report: dict, min_psnr: float = 20.0) -> bool:
                     return True
         if section == "renditions" and diff.get("type") == "mismatches":
             for entry in diff.get("entries", []):
+                layout = entry.get("layout", "")
                 for iss in entry.get("issues", []):
                     field = iss.get("field", "")
                     a_val = iss.get("a")
                     b_val = iss.get("b")
-                    # Data size naturally differs with different atlas
-                    # packing layouts (lossy recompression produces
-                    # different byte counts).
+                    # Packed atlas textures are internal — different
+                    # packing layouts produce different dimensions, bpr,
+                    # and compression sizes. Only the extracted images
+                    # (pixels) matter.
+                    if layout == "packed_atlas":
+                        continue
+                    # Data size naturally varies
                     if field == "rend_size":
                         continue
-                    # RLE vs uncompressed is an edge case where our
-                    # encoder barely compresses (or doesn't) while the
-                    # system's does (or vice versa). Both are valid.
+                    # RLE vs uncompressed is an encoder edge case
                     if field == "compression" and {a_val, b_val} <= {
                             "rle", "uncompressed"}:
                         continue

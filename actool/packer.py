@@ -58,7 +58,7 @@ class Atlas:
     @property
     def name(self) -> str:
         fmt_idx = 0 if self.pixel_format == b"BGRA" else 1
-        return f"ZZZZPackedAsset-{self.scale}.1.{fmt_idx}-gamut0"
+        return f"ZZZZPackedAsset-{self.scale}.{self.dim1}.{fmt_idx}-gamut0"
 
     @property
     def bytes_per_row(self) -> int:
