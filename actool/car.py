@@ -25,13 +25,18 @@ except ImportError:
 # Base tokens always included:
 KEYFORMAT_BASE = [7, 13, 1, 2, 3, 17, 11, 12]
 # Optional tokens included only when used by any rendition:
-KEYFORMAT_OPTIONAL = {8, 9}  # Dim1, Dim2
+KEYFORMAT_OPTIONAL = {4, 8, 9}  # Direction, Dim1, Dim2
 # Full ordered list (insertion position matters for key construction):
-KEYFORMAT_ALL = [7, 13, 1, 2, 3, 17, 8, 9, 11, 12]
+KEYFORMAT_ALL = [7, 13, 1, 2, 3, 4, 17, 8, 9, 11, 12]
 # Legacy aliases
 KEYFORMAT_ATTRS_ICON = KEYFORMAT_ALL
-KEYFORMAT_ATTRS_NO_ICON = [7, 13, 1, 2, 3, 17, 8, 11, 12]
+KEYFORMAT_ATTRS_NO_ICON = [7, 13, 1, 2, 3, 4, 17, 8, 11, 12]
 KEYFORMAT_ATTRS = KEYFORMAT_ALL
+
+# Language direction values (token 4)
+DIRECTION_DEFAULT = 0
+DIRECTION_RTL = 4
+DIRECTION_LTR = 5
 
 ELEMENT_UNIVERSAL = 85  # 0x55
 ELEMENT_PACKED = 9  # Element for packed assets
@@ -58,16 +63,19 @@ PIXELFMT_PDF = b" FDP"   # 'PDF ' as LE uint32
 def compute_keyformat(renditions, force_dim1: bool = False) -> list[int]:
     """Compute the dynamic KEYFORMAT based on which attributes are used.
 
-    Only includes optional tokens (Dim1, Dim2) if any rendition uses
-    a non-zero value for them. force_dim1 includes Dim1 even if no
+    Only includes optional tokens (Direction, Dim1, Dim2) if any rendition
+    uses a non-zero value for them. force_dim1 includes Dim1 even if no
     rendition explicitly uses it (needed when packed assets will use it).
     """
+    used_direction = any(r.direction != 0 for r in renditions)
     used_dim1 = force_dim1 or any(r.dim1 != 0 for r in renditions)
     used_dim2 = any(r.dim2 != 0 for r in renditions)
 
     tokens = []
     for t in KEYFORMAT_ALL:
         if t in KEYFORMAT_OPTIONAL:
+            if t == 4 and not used_direction:
+                continue
             if t == 8 and not used_dim1:
                 continue
             if t == 9 and not used_dim2:
@@ -127,6 +135,7 @@ def make_keyformat(attrs: list[int] = None) -> bytes:
 
 def make_rendition_key(appearance: int = 0, unknown13: int = 0,
                        element: int = 0, part: int = 0, size: int = 0,
+                       direction: int = 0,
                        identifier: int = 0, dim1: int = 0, dim2: int = 0,
                        layer: int = 0, scale: int = 0,
                        keyformat: list[int] = None,
@@ -134,7 +143,8 @@ def make_rendition_key(appearance: int = 0, unknown13: int = 0,
     """Build a rendition key matching the given keyformat tokens."""
     attr_values = {
         7: appearance, 13: unknown13, 1: element, 2: part, 3: size,
-        17: identifier, 8: dim1, 9: dim2, 11: layer, 12: scale,
+        4: direction, 17: identifier, 8: dim1, 9: dim2, 11: layer,
+        12: scale,
     }
     if keyformat is not None:
         vals = [attr_values.get(t, 0) for t in keyformat]
@@ -536,6 +546,7 @@ class Rendition:
     dim1: int = 0
     dim2: int = 0
     appearance: int = 0
+    direction: int = 0
     is_template: bool = False  # Deprecated, use template_rendering_intent
     template_rendering_intent: int = -1  # bitmapEncoding: -1=auto, 0=original, 4=automatic, 2=template
     colorspace_id: int = 1
@@ -554,6 +565,7 @@ class Rendition:
             unknown13=locale_id,
             element=self.element,
             part=self.part,
+            direction=self.direction,
             identifier=self.identifier,
             dim1=self.dim1,
             dim2=self.dim2,

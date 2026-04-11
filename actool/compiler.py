@@ -107,6 +107,8 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
                 template_rendering_intent=intent,
                 part=rend.part,
                 dim2=rend.dim2,
+                appearance=rend.appearance,
+                direction=rend.direction,
             ))
 
         # Split into multiple atlases if needed
@@ -158,6 +160,8 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
                     part=img.part,
                     identifier=img.identifier,
                     dim2=img.dim2,
+                    appearance=img.appearance,
+                    direction=img.direction,
                     scale=scale,
                     keyformat=keyformat_attrs,
                 )

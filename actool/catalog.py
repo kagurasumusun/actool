@@ -300,6 +300,14 @@ class AssetCatalog:
             if locale:
                 self._locales_used.add(locale)
 
+            # Language direction (token 4 in keyformat)
+            lang_dir_str = img_info.get("language-direction", "")
+            direction_map = {
+                "left-to-right": car.DIRECTION_LTR,
+                "right-to-left": car.DIRECTION_RTL,
+            }
+            direction = direction_map.get(lang_dir_str, car.DIRECTION_DEFAULT)
+
             # PDF files are stored as raw data (layout 9), not rasterized
             if filename.lower().endswith(".pdf"):
                 with open(img_path, "rb") as pdf_f:
@@ -311,6 +319,7 @@ class AssetCatalog:
                     element=car.ELEMENT_UNIVERSAL,
                     part=car.PART_REGULAR,
                     scale=1,
+                    direction=direction,
                     layout=car.LAYOUT_PDF,
                     pixel_format=car.PIXELFMT_PDF,
                 )
@@ -331,6 +340,7 @@ class AssetCatalog:
                 height=height,
                 pixel_data=pixel_data,
                 pixel_format=pixel_format,
+                direction=direction,
                 layout=car.LAYOUT_ONE_PART_SCALE,
                 template_rendering_intent=template_intent,
                 locale=locale,

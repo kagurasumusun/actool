@@ -40,6 +40,8 @@ class PackedImage:
     template_rendering_intent: int = 4  # bitmapEncoding: 0=original, 4=automatic, 2=template
     part: int = 181  # PART_REGULAR by default, PART_ICON for icons
     dim2: int = 0  # For icon images, the multisize index
+    appearance: int = 0
+    direction: int = 0
 
 
 @dataclass

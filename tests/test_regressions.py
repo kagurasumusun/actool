@@ -12,11 +12,13 @@ import unittest
 
 from PIL import Image
 
+from actool import car
 from actool.catalog import load_image_as_bgra
 from actool.compiler import compile_catalog
 from tests.helpers import (
     make_temp_catalog, parse_car_info, parse_car_csi_by_name,
     has_extract_pixels, extract_car_image,
+    _read_car_blocks, _walk_tree_leaves,
 )
 
 
@@ -600,3 +602,264 @@ class TestIconset(unittest.TestCase):
         self.assertEqual((w, h), (32, 32))
         # RGBA: check R channel (premultiplied, but alpha=255 so same)
         self.assertEqual(pixels[0], 200)
+
+
+def _make_colorset(parent_dir, name, colors):
+    """Create a .colorset directory.
+
+    colors: list of dicts, each with:
+        r, g, b, a: float 0-1
+        appearance: optional, "dark" for dark mode variant
+    """
+    import json
+    cset = os.path.join(parent_dir, f"{name}.colorset")
+    os.makedirs(cset, exist_ok=True)
+    entries = []
+    for c in colors:
+        entry = {
+            "idiom": "universal",
+            "color": {
+                "color-space": "srgb",
+                "components": {
+                    "red": str(c["r"]),
+                    "green": str(c["g"]),
+                    "blue": str(c["b"]),
+                    "alpha": str(c["a"]),
+                },
+            },
+        }
+        if c.get("appearance") == "dark":
+            entry["appearances"] = [
+                {"appearance": "luminosity", "value": "dark"}
+            ]
+        entries.append(entry)
+    with open(os.path.join(cset, "Contents.json"), "w") as f:
+        json.dump({
+            "info": {"author": "xcode", "version": 1},
+            "colors": entries,
+        }, f)
+
+
+def _make_directional_imageset(parent_dir, name, ltr_color, rtl_color):
+    """Create an imageset with language-direction variants."""
+    import json
+    iset = os.path.join(parent_dir, f"{name}.imageset")
+    os.makedirs(iset, exist_ok=True)
+    Image.new("RGBA", (16, 16), ltr_color).save(
+        os.path.join(iset, f"{name}-ltr.png"))
+    Image.new("RGBA", (16, 16), rtl_color).save(
+        os.path.join(iset, f"{name}-rtl.png"))
+    with open(os.path.join(iset, "Contents.json"), "w") as f:
+        json.dump({
+            "images": [
+                {"filename": f"{name}-ltr.png", "idiom": "universal",
+                 "language-direction": "left-to-right"},
+                {"filename": f"{name}-rtl.png", "idiom": "universal",
+                 "language-direction": "right-to-left"},
+            ],
+            "info": {"author": "xcode", "version": 1},
+        }, f)
+
+
+def _parse_keyformat(car_path):
+    """Read the KEYFORMAT token list from a car file."""
+    data, blocks, named, read_block = _read_car_blocks(car_path)
+    kf = read_block(named["KEYFORMAT"])
+    count = struct.unpack_from('<I', kf, 8)[0]
+    return [struct.unpack_from('<I', kf, 12 + i * 4)[0]
+            for i in range(count)]
+
+
+def _parse_appearance_keys(car_path):
+    """Read the APPEARANCEKEYS tree → {name: id}."""
+    data, blocks, named, read_block = _read_car_blocks(car_path)
+    if "APPEARANCEKEYS" not in named:
+        return {}
+    tree = read_block(named["APPEARANCEKEYS"])
+    root = struct.unpack('>I', tree[8:12])[0]
+    result = {}
+    for key_bytes, val_bytes in _walk_tree_leaves(read_block, root):
+        name = key_bytes.rstrip(b'\x00').decode()
+        val = struct.unpack('<H', val_bytes[:2])[0]
+        result[name] = val
+    return result
+
+
+class TestDarkModeColors(unittest.TestCase):
+    """Colorsets with dark-mode appearance variants must produce two
+    renditions — one with appearance=0 (light) and one with appearance=1
+    (dark) — and an APPEARANCEKEYS block mapping names to IDs.
+
+    Regression: dark mode color variants were parsed but the
+    APPEARANCEKEYS block and keyformat token 7 (ThemeAppearance) were
+    not verified to work end-to-end.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="actool_dark_")
+        self.catalog = os.path.join(self.tmpdir, "Test.xcassets")
+        os.makedirs(self.catalog)
+        import json
+        with open(os.path.join(self.catalog, "Contents.json"), "w") as f:
+            json.dump({"info": {"author": "xcode", "version": 1}}, f)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def _compile(self):
+        outdir = os.path.join(self.tmpdir, "out")
+        compile_catalog(self.catalog, outdir, "macosx", "11.0")
+        return os.path.join(outdir, "Assets.car")
+
+    def test_dark_color_produces_two_renditions(self):
+        """A colorset with light+dark produces two color renditions."""
+        _make_colorset(self.catalog, "Accent", [
+            {"r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0},
+            {"r": 0.0, "g": 0.0, "b": 1.0, "a": 1.0, "appearance": "dark"},
+        ])
+        car_path = self._compile()
+        csi = parse_car_csi_by_name(car_path)
+        entries = csi.get("Accent", [])
+        self.assertEqual(len(entries), 2,
+                         "Should have light and dark renditions")
+        layouts = {e["layout"] for e in entries}
+        self.assertEqual(layouts, {1009})
+
+    def test_appearance_keys_block_present(self):
+        """APPEARANCEKEYS named block exists when dark mode is used."""
+        _make_colorset(self.catalog, "Bg", [
+            {"r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0},
+            {"r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0, "appearance": "dark"},
+        ])
+        car_path = self._compile()
+        ak = _parse_appearance_keys(car_path)
+        self.assertIn("NSAppearanceNameDarkAqua", ak)
+        self.assertEqual(ak["NSAppearanceNameDarkAqua"], 1)
+
+    def test_no_dark_mode_no_appearance_keys(self):
+        """Without dark mode, APPEARANCEKEYS may still exist but dark=1."""
+        _make_colorset(self.catalog, "Plain", [
+            {"r": 0.5, "g": 0.5, "b": 0.5, "a": 1.0},
+        ])
+        car_path = self._compile()
+        # Should still compile without issues
+        info = parse_car_info(car_path)
+        self.assertEqual(info["layout_counts"].get(1009, 0), 1)
+
+    def test_dark_color_values_correct(self):
+        """Light and dark renditions contain the correct colour values."""
+        from tests.helpers import parse_colr_rendition
+        _make_colorset(self.catalog, "Test", [
+            {"r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0},
+            {"r": 0.0, "g": 1.0, "b": 0.0, "a": 0.5, "appearance": "dark"},
+        ])
+        car_path = self._compile()
+        csi = parse_car_csi_by_name(car_path)
+        entries = csi["Test"]
+        # Sort by appearance (token 7 in key)
+        for entry in entries:
+            colr = parse_colr_rendition(entry["rend"])
+            self.assertIsNotNone(colr)
+            r, g, b, a = colr["components"]
+            # Determine which variant this is from the key
+            key_vals = struct.unpack_from(
+                f'<{len(entry["key"])//2}H', entry["key"])
+            # Token 7 (appearance) is always first in keyformat
+            appearance = key_vals[0]
+            if appearance == 0:
+                self.assertAlmostEqual(r, 1.0, places=3)
+                self.assertAlmostEqual(a, 1.0, places=3)
+            else:
+                self.assertAlmostEqual(g, 1.0, places=3)
+                self.assertAlmostEqual(a, 0.5, places=3)
+
+
+class TestLanguageDirection(unittest.TestCase):
+    """Imagesets with language-direction must include token 4 (Direction)
+    in the keyformat and set the correct direction values on renditions.
+
+    Regression: language-direction was ignored, causing the keyformat to
+    omit token 4 and all direction-specific renditions to share the same
+    key (collision).
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="actool_dir_")
+        self.catalog = os.path.join(self.tmpdir, "Test.xcassets")
+        os.makedirs(self.catalog)
+        import json
+        with open(os.path.join(self.catalog, "Contents.json"), "w") as f:
+            json.dump({"info": {"author": "xcode", "version": 1}}, f)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def _compile(self):
+        outdir = os.path.join(self.tmpdir, "out")
+        compile_catalog(self.catalog, outdir, "macosx", "11.0")
+        return os.path.join(outdir, "Assets.car")
+
+    def test_direction_adds_token_4(self):
+        """Token 4 appears in keyformat when language-direction is used."""
+        _make_directional_imageset(
+            self.catalog, "Arrow", (255, 0, 0, 255), (0, 0, 255, 255))
+        car_path = self._compile()
+        kf = _parse_keyformat(car_path)
+        self.assertIn(4, kf, "Token 4 (Direction) should be in keyformat")
+
+    def test_no_direction_no_token_4(self):
+        """Token 4 absent when no language-direction is used."""
+        # Just regular images, no direction
+        import json
+        iset = os.path.join(self.catalog, "Plain.imageset")
+        os.makedirs(iset)
+        Image.new("RGBA", (16, 16), (100, 100, 100, 255)).save(
+            os.path.join(iset, "Plain.png"))
+        Image.new("RGBA", (32, 32), (100, 100, 100, 255)).save(
+            os.path.join(iset, "Plain@2x.png"))
+        with open(os.path.join(iset, "Contents.json"), "w") as f:
+            json.dump({
+                "images": [
+                    {"filename": "Plain.png", "idiom": "mac", "scale": "1x"},
+                    {"filename": "Plain@2x.png", "idiom": "mac",
+                     "scale": "2x"},
+                ],
+                "info": {"author": "xcode", "version": 1},
+            }, f)
+        car_path = self._compile()
+        kf = _parse_keyformat(car_path)
+        self.assertNotIn(4, kf,
+                         "Token 4 should be absent without direction")
+
+    def test_direction_values_correct(self):
+        """LTR and RTL renditions have distinct direction values."""
+        _make_directional_imageset(
+            self.catalog, "Nav", (255, 0, 0, 255), (0, 0, 255, 255))
+        car_path = self._compile()
+        csi = parse_car_csi_by_name(car_path)
+
+        kf = _parse_keyformat(car_path)
+        dir_idx = kf.index(4)
+
+        directions = set()
+        for name, entries in csi.items():
+            for entry in entries:
+                key_vals = struct.unpack_from(
+                    f'<{len(entry["key"])//2}H', entry["key"])
+                if len(key_vals) > dir_idx:
+                    d = key_vals[dir_idx]
+                    if d != 0:
+                        directions.add(d)
+
+        self.assertIn(car.DIRECTION_LTR, directions)
+        self.assertIn(car.DIRECTION_RTL, directions)
+
+    def test_both_variants_renderable(self):
+        """Both LTR and RTL renditions are present in the car."""
+        _make_directional_imageset(
+            self.catalog, "Arrow", (255, 0, 0, 255), (0, 0, 255, 255))
+        car_path = self._compile()
+        csi = parse_car_csi_by_name(car_path)
+        # Both LTR and RTL filenames should be present as renditions
+        self.assertIn("Arrow-ltr.png", csi)
+        self.assertIn("Arrow-rtl.png", csi)
