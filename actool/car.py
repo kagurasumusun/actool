@@ -729,49 +729,64 @@ class Rendition:
             tlv += make_metrics_tlv(self.width, self.height)
             tlv += make_blend_opacity_tlv()
             tlv += make_exif_orientation_tlv()
-            if self.pixel_data:
-                # KCBC-chunked LZFSE requires 32-byte aligned row stride;
-                # gzip/uncompressed use exact width*bpp stride.
-                deploy_ver = _parse_version(self.min_deploy)
-                lzfse_min = _MIN_LZFSE_VERSION.get(self.platform, (10, 11))
-                use_aligned = HAS_LZFSE and deploy_ver >= lzfse_min
-                tlv += make_bytes_per_row_tlv(self.width, self.pixel_format,
-                                              aligned=use_aligned)
-
-        # Build rendition data — pad rows when using aligned stride.
+        # Build rendition data and BytesPerRow TLV together, since
+        # the bpr must match the actual data stride used by the compressor.
         rend_data = b""
         if self.pixel_data:
             pixel_data = self.pixel_data
             deploy_ver = _parse_version(self.min_deploy)
             lzfse_min = _MIN_LZFSE_VERSION.get(self.platform, (10, 11))
             use_aligned = HAS_LZFSE and deploy_ver >= lzfse_min
+
+            # deepmap2 for GA8 and non-icon BGRA; KCBC LZFSE for icon BGRA
+            use_dmp2 = (self.pixel_format == b" 8AG" or
+                        (self.pixel_format == b"BGRA" and
+                         self.part != PART_ICON))
+
             if use_aligned:
+                # Pad rows to the stride that the compressor expects.
+                # deepmap2 sub-header uses 4bpp stride (via aligned_bytes_per_row);
+                # KCBC LZFSE uses native-bpp stride.
+                dmp2_min = _MIN_DMP2_VERSION.get(self.platform, (11, 0))
+                will_try_dmp2 = (use_dmp2 and deploy_ver >= dmp2_min
+                                 and len(pixel_data) > 256)
+                if will_try_dmp2:
+                    # deepmap2 encoder uses 4bpp stride for row_bytes
+                    padded_bpr = aligned_bytes_per_row(self.width,
+                                                       self.pixel_format)
+                else:
+                    actual_bpp = 4 if self.pixel_format == b"BGRA" else 2
+                    padded_bpr = ((self.width * actual_bpp + 31) // 32) * 32
                 actual_bpp = 4 if self.pixel_format == b"BGRA" else 2
                 exact_bpr = self.width * actual_bpp
-                aligned_bpr = aligned_bytes_per_row(self.width,
-                                                     self.pixel_format)
-                if aligned_bpr != exact_bpr and self.height > 0:
+                if padded_bpr != exact_bpr and self.height > 0:
                     padded = bytearray()
-                    pad = aligned_bpr - exact_bpr
+                    pad = padded_bpr - exact_bpr
                     for row in range(self.height):
                         start = row * exact_bpr
                         padded.extend(pixel_data[start:start + exact_bpr])
                         padded.extend(b'\x00' * pad)
                     pixel_data = bytes(padded)
-            # deepmap2 is used for:
-            #   - GA8 inline images (inline DMP2 format)
-            #   - Non-icon BGRA inline images (sub-header DMP2 format)
-            # Icon BGRA images use KCBC LZFSE instead.
-            use_dmp2 = (self.pixel_format == b" 8AG" or
-                        (self.pixel_format == b"BGRA" and
-                         self.part != PART_ICON))
-            dmp2_inline = self.pixel_format == b" 8AG"
             rend_data = compress_data(pixel_data, self.pixel_format,
                                       self.width, self.height,
                                       min_deploy=self.min_deploy,
                                       platform=self.platform,
                                       allow_dmp2=use_dmp2,
-                                      dmp2_inline=dmp2_inline)
+                                      dmp2_inline=False)
+
+            # BytesPerRow TLV: must match actual data stride.
+            # deepmap2 uses 4bpp stride; KCBC LZFSE uses native bpp stride;
+            # pre-LZFSE uses exact width*4.
+            actual_comp = (struct.unpack_from('<I', rend_data, 8)[0]
+                           if len(rend_data) >= 12 else 0)
+            if actual_comp == 11:  # deepmap2 — always 4bpp aligned
+                bpr = aligned_bytes_per_row(self.width, self.pixel_format)
+            elif use_aligned:  # KCBC LZFSE — native bpp aligned
+                actual_bpp = 4 if self.pixel_format == b"BGRA" else 2
+                bpr = ((self.width * actual_bpp + 31) // 32) * 32
+            else:  # pre-LZFSE — exact width*4
+                bpr = self.width * 4
+            tlv += struct.pack("<II", 0x03EF, 4) + struct.pack("<I", bpr)
 
         # Template rendering intent → bitmapEncoding field (bits 2-5):
         #   0 (0x00) = original,  4 (0x10) = automatic,  2 (0x08) = template

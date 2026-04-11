@@ -114,10 +114,10 @@ def encode(pixel_data: bytes, pixel_format: bytes,
     if dm_fmt is None:
         return None
 
-    bpp = _pixel_size(pixel_format)
-    # Row stride uses the pixel format's native bpp, aligned to 32 bytes.
-    exact = width * bpp
-    row_bytes = ((exact + 31) // 32) * 32
+    # Row stride is derived from the actual data layout, not the pixel
+    # format's native bpp. The caller may pad GA8 data to 4bpp stride
+    # for deepmap2 sub-header format.
+    row_bytes = len(pixel_data) // height if height > 0 else width * 4
 
     # Create a mutable buffer for vImage
     src_buf = (ctypes.c_uint8 * len(pixel_data)).from_buffer_copy(pixel_data)

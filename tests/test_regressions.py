@@ -1657,3 +1657,81 @@ class TestRleCompression(unittest.TestCase):
             self.assertEqual(a, 200, f"Center alpha should be 200, got {a}")
         finally:
             shutil.rmtree(tmpdir)
+
+
+class TestInlineGa8Deepmap2(unittest.TestCase):
+    """Inline GA8 images at macOS >= 11.0 must use deepmap2 sub-header
+    format with 4bpp-aligned bpr, preserving the alpha channel.
+
+    Regression: GA8 inline images used inline DMP2 format (raw, no
+    sub-header) which lost the alpha channel, or used the sub-header
+    format with native 2bpp stride while the deepmap2 encoder expected
+    4bpp stride, causing pixel misalignment.
+    """
+
+    @unittest.skipUnless(has_extract_pixels(), "extract_pixels not built")
+    def test_ga8_inline_preserves_alpha(self):
+        """Large GA8 inline image preserves alpha at 11.0."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_ga8dmp2_")
+        try:
+            # 200x200 GA8 image — large enough for deepmap2, inline (≥192)
+            img = Image.new("LA", (200, 200), (100, 180))
+            catalog = _make_catalog_with_image(tmpdir, "GaImg", img)
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "11.0")
+            car = os.path.join(outdir, "Assets.car")
+            ext = os.path.join(tmpdir, "ext")
+            os.makedirs(ext)
+            result = extract_car_image(car, "GaImg", ext)
+            self.assertIn(1, result)
+            w, h, pixels = result[1]
+            # Check center pixel has alpha
+            cx, cy = w // 2, h // 2
+            off = (cy * w + cx) * 4
+            a = pixels[off + 3]
+            self.assertAlmostEqual(a, 180, delta=5,
+                                   msg=f"GA8 alpha should be ~180, got {a}")
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_ga8_inline_uses_deepmap2_subheader(self):
+        """GA8 inline at 11.0 uses deepmap2 with sub-header (not inline)."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_ga8fmt_")
+        try:
+            img = Image.new("LA", (200, 200), (100, 180))
+            catalog = _make_catalog_with_image(tmpdir, "GaImg", img)
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "11.0")
+            csi = parse_car_csi_by_name(os.path.join(outdir, "Assets.car"))
+            entry = csi["GaImg.png"][0]
+            rend = entry["rend"]
+            comp = struct.unpack_from('<I', rend, 8)[0]
+            self.assertEqual(comp, 11, "Should use deepmap2")
+            # Check sub-header (not inline)
+            payload = rend[16:20]
+            self.assertNotEqual(payload, b"dmp2",
+                                "Should use sub-header format, not inline")
+            sub_ver = struct.unpack_from('<I', rend, 16)[0]
+            self.assertEqual(sub_ver, 1, "Sub-header version should be 1")
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_ga8_inline_bpr_4bpp_at_11_0(self):
+        """GA8 inline at 11.0 uses 4bpp-aligned BytesPerRow."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_ga8bpr_")
+        try:
+            img = Image.new("LA", (200, 200), (100, 180))
+            catalog = _make_catalog_with_image(tmpdir, "GaImg", img)
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "11.0")
+            csi = parse_car_csi_by_name(os.path.join(outdir, "Assets.car"))
+            entry = csi["GaImg.png"][0]
+            bpr_tlv = entry["tlvs"].get(0x03EF)
+            self.assertIsNotNone(bpr_tlv)
+            bpr = struct.unpack_from('<I', bpr_tlv, 0)[0]
+            expected = ((200 * 4 + 31) // 32) * 32  # 4bpp aligned
+            self.assertEqual(bpr, expected,
+                             f"BytesPerRow should be {expected} (4bpp), "
+                             f"got {bpr}")
+        finally:
+            shutil.rmtree(tmpdir)

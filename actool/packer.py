@@ -301,8 +301,8 @@ def group_for_packing(renditions) -> tuple[list, list]:
             icon_renditions.append(rend)
             continue
         # Images too large for atlas packing are stored inline
-        if (rend.width > PACK_MAX_WIDTH - PACK_MARGIN or
-                rend.height > PACK_MAX_HEIGHT - PACK_MARGIN):
+        if (rend.width >= PACK_MAX_WIDTH - PACK_MARGIN or
+                rend.height >= PACK_MAX_HEIGHT - PACK_MARGIN):
             icon_renditions.append(rend)
             continue
         # Group by format, scale, and sprite atlas
