@@ -305,17 +305,16 @@ def compress_data(pixel_data: bytes, pixel_format: bytes,
                   platform: str = "macosx",
                   allow_dmp2: bool = False,
                   dmp2_inline: bool = False,
-                  packed: bool = False,
-                  is_icon: bool = False) -> bytes:
+                  is_opaque: bool = False) -> bytes:
     """Compress pixel data and return the rendition payload (CELM block).
 
     Compression selection (matching system actool behaviour):
     - macOS >= 11.0 with allow_dmp2: DMP2 via vImage
-      - packed=True (atlas): CELM ver=0 with sub-header
-      - packed=False (inline): CELM ver=2 with sub-header
+      - is_opaque=True: CELM ver=2 (opaque/RGB source images)
+      - is_opaque=False: CELM ver=0 (images with alpha)
     - macOS >= 10.11: KCBC-chunked LZFSE (comp=4)
-      - packed=True or is_icon=True: CELM ver=1
-      - otherwise (regular inline): CELM ver=3
+      - is_opaque=True: CELM ver=3
+      - is_opaque=False: CELM ver=1
     - Older: Uncompressed (CELM ver=0, comp=0)
     """
     from . import deepmap2
@@ -328,9 +327,9 @@ def compress_data(pixel_data: bytes, pixel_format: bytes,
         if deploy_ver >= dmp2_min and len(pixel_data) > 256:
             dmp2_data = deepmap2.encode(pixel_data, pixel_format, width, height)
             if dmp2_data is not None:
-                # Packed atlas DMP2: CELM ver=0
-                # Inline DMP2: CELM ver=2
-                celm_ver = 0 if packed else 2
+                # Opaque images (RGB source): CELM ver=2
+                # Images with alpha: CELM ver=0
+                celm_ver = 2 if is_opaque else 0
                 return deepmap2.make_celm_dmp2(dmp2_data, pixel_format,
                                                inline=dmp2_inline,
                                                celm_version=celm_ver)
@@ -340,15 +339,14 @@ def compress_data(pixel_data: bytes, pixel_format: bytes,
     # chunk).  Each chunk is independently LZFSE-compressed and wrapped
     # with a 16-byte header, a bvx$ end marker, and a KCBC boundary
     # marker.
-    # Packed atlases and icon images use CELM ver=1;
-    # regular inline images use CELM ver=3.
+    # Images with alpha use CELM ver=1; opaque images use CELM ver=3.
     lzfse_min = _MIN_LZFSE_VERSION.get(platform, (10, 11))
     if HAS_LZFSE and deploy_ver >= lzfse_min and len(pixel_data) > 256:
         kcbc = _compress_kcbc(pixel_data, height)
         if kcbc is not None:
             # CELM header claims payload=3 but the KCBC marker is 4 bytes.
             # CoreUI reads 4 bytes regardless of the payload field.
-            celm_ver = 1 if (packed or is_icon) else 3
+            celm_ver = 3 if is_opaque else 1
             celm = struct.pack("<4sIII", b"MLEC", celm_ver, 4, 3)
             return celm + b"KCBC" + kcbc
 
@@ -567,7 +565,7 @@ def build_packed_asset_csi(name: str, width: int, height: int,
     use_dmp2 = pixel_format == b" 8AG"
     rend_data = compress_data(pixel_data, pixel_format, width, height,
                               min_deploy=min_deploy, platform=platform,
-                              allow_dmp2=use_dmp2, packed=True)
+                              allow_dmp2=use_dmp2)
     # The BytesPerRow TLV must match the actual data stride.
     # deepmap2 uses 4bpp-aligned stride; lzfse/zip use the atlas's
     # native-bpp stride.  Detect which compressor was used.
@@ -779,13 +777,15 @@ class Rendition:
                         padded.extend(pixel_data[start:start + exact_bpr])
                         padded.extend(b'\x00' * pad)
                     pixel_data = bytes(padded)
+            opaque = _check_opaque(self.pixel_data, self.pixel_format,
+                                   self.width, self.height)
             rend_data = compress_data(pixel_data, self.pixel_format,
                                       self.width, self.height,
                                       min_deploy=self.min_deploy,
                                       platform=self.platform,
                                       allow_dmp2=use_dmp2,
                                       dmp2_inline=False,
-                                      is_icon=self.part == PART_ICON)
+                                      is_opaque=opaque)
 
             # BytesPerRow TLV: must match actual data stride.
             # deepmap2 uses 4bpp stride; KCBC LZFSE uses native bpp stride;

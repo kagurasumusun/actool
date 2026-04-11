@@ -1131,9 +1131,9 @@ class TestKcbcChunkedLzfse(unittest.TestCase):
             shutil.rmtree(tmpdir)
 
     def test_1011_uses_kcbc(self):
-        """macOS 10.11 inline images use KCBC (CELM ver=3 comp=4)."""
+        """macOS 10.11 inline images with alpha use KCBC (CELM ver=1 comp=4)."""
         ver, comp, _, _ = self._compile_and_get_celm(64, 64)
-        self.assertEqual(ver, 3, "Inline KCBC should use CELM ver=3")
+        self.assertEqual(ver, 1, "KCBC with alpha should use CELM ver=1")
         self.assertEqual(comp, 4, "KCBC should use comp=4")
 
     def test_celm_payload_is_3(self):

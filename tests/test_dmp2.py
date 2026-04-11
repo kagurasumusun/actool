@@ -199,12 +199,13 @@ class TestCompressDataDmp2Selection(unittest.TestCase):
         """compress_data with allow_dmp2=True and target 11.0 uses DMP2."""
         w, h = 64, 64
         data = self._make_pixel_data(w, h)
+        # Pixel data has alpha=0xFF (opaque), so celm_ver should be 2
         result = compress_data(data, b"BGRA", w, h,
                                min_deploy="11.0", platform="macosx",
-                               allow_dmp2=True)
+                               allow_dmp2=True, is_opaque=True)
         ver, comp = struct.unpack_from('<II', result, 4)
         self.assertEqual(comp, 11, "Expected DMP2 (comp=11)")
-        self.assertEqual(ver, 2, "Expected CELM ver=2 for inline DMP2")
+        self.assertEqual(ver, 2, "Expected CELM ver=2 for opaque DMP2")
 
     def test_lzfse_used_for_standalone_at_11_0(self):
         """compress_data with allow_dmp2=False and target 11.0 uses LZFSE."""

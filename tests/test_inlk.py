@@ -400,13 +400,19 @@ class TestCelmFormat(unittest.TestCase):
                                  f"celm_payload=3")
 
     def test_celm_lzfse_uses_kcbc(self):
-        """When LZFSE is used, it must be CELM ver=1 (KCBC chunked)."""
+        """When LZFSE is used, it must be KCBC chunked (ver=1 or ver=3).
+
+        CELM ver=1 is used for images with alpha; ver=3 for opaque images.
+        Both use KCBC chunking. Plain LZFSE without KCBC (ver=2) crashes
+        CoreUI.
+        """
         entries = _parse_celm_entries(self.car_path)
         for e in entries:
             if e['celm_comp'] == 4:
-                self.assertEqual(e['celm_ver'], 1,
-                                 f"{e['name']}: LZFSE comp=4 requires ver=1 "
-                                 f"(KCBC), got ver={e['celm_ver']}")
+                self.assertIn(e['celm_ver'], (1, 3),
+                              f"{e['name']}: LZFSE comp=4 requires ver=1 "
+                              f"(alpha) or ver=3 (opaque), got "
+                              f"ver={e['celm_ver']}")
 
     def test_celm_no_lzfse_for_pre_10_11(self):
         """LZFSE must not be used when targeting macOS < 10.11.
