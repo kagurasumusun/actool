@@ -115,7 +115,7 @@ def encode(pixel_data: bytes, pixel_format: bytes,
         return None
 
     bpp = _pixel_size(pixel_format)
-    # Row stride must match the actual pixel buffer layout (32-byte aligned)
+    # Row stride uses the pixel format's native bpp, aligned to 32 bytes.
     exact = width * bpp
     row_bytes = ((exact + 31) // 32) * 32
 
@@ -175,6 +175,8 @@ def make_celm_dmp2(dmp2_data: bytes, pixel_format: bytes,
     total_payload = sub_header + dmp2_data
     total_len = len(total_payload)
 
-    # CELM header: "MLEC" + ver=2 + comp=11 + total_payload_len
-    celm = struct.pack("<4sIII", b"MLEC", 2, 11, total_len)
+    # CELM header: "MLEC" + ver=0 + comp=11 + total_payload_len
+    # The system actool uses ver=0 for packed atlas DMP2 (with sub-header),
+    # not ver=2. Ver=2 causes CoreUI to misinterpret the pixel data.
+    celm = struct.pack("<4sIII", b"MLEC", 0, 11, total_len)
     return celm + total_payload

@@ -62,32 +62,29 @@ class Atlas:
     def bytes_per_row(self) -> int:
         """Row stride in bytes, aligned to 32 bytes.
 
-        CoreUI always reads rows at 4-bpp stride, even for GA8 (2 bpp).
+        Uses the native bytes-per-pixel for the pixel format.
         """
-        exact = self.width * 4
+        bpp = 4 if self.pixel_format == b"BGRA" else 2
+        exact = self.width * bpp
         return ((exact + 31) // 32) * 32
 
     def render(self):
         """Render all packed images into a single atlas pixel buffer.
 
-        Rows are padded to 32-byte alignment to match CoreUI's expected
-        stride. The buffer uses top-down row order; the INLK y coordinates
-        are flipped to bottom-left origin separately by the compiler.
-
-        CoreUI always uses 4-bpp stride for the atlas, even for GA8 images.
-        Source GA8 data (2 bpp) is placed at 4-bpp offsets in the atlas.
+        Rows are padded to 32-byte alignment. The buffer uses top-down row
+        order; the INLK y coordinates are flipped to bottom-left origin
+        separately by the compiler.
         """
-        actual_bpp = 4 if self.pixel_format == b"BGRA" else 2
-        atlas_bpp = 4  # CoreUI always uses 4 bpp stride
+        bpp = 4 if self.pixel_format == b"BGRA" else 2
         bpr = self.bytes_per_row
         buf = bytearray(bpr * self.height)
 
         for img in self.images:
-            src_stride = img.width * actual_bpp
+            src_stride = img.width * bpp
 
             for row in range(img.height):
                 src_off = row * src_stride
-                dst_off = (img.y + row) * bpr + img.x * atlas_bpp
+                dst_off = (img.y + row) * bpr + img.x * bpp
                 buf[dst_off:dst_off + src_stride] = \
                     img.pixel_data[src_off:src_off + src_stride]
 
@@ -297,14 +294,6 @@ def group_for_packing(renditions) -> tuple[list, list]:
         if hasattr(rend, '_csi_override'):
             icon_renditions.append(rend)
             continue
-        # Template images with transparency are stored inline
-        # (opaque template images pack normally)
-        if rend.template_rendering_intent == 2 and rend.pixel_data:
-            if not car._check_opaque(rend.pixel_data, rend.pixel_format,
-                                     rend.width, rend.height):
-                icon_renditions.append(rend)
-                continue
-
         # Group by format, scale, and sprite atlas
         # Icons pack together with regular images (Apple doesn't separate them)
         atlas_id = rend.sprite_atlas_id  # 0 for regular, non-zero for sprites

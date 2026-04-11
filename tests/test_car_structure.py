@@ -114,8 +114,8 @@ class TestRenditionCounts(unittest.TestCase):
 
     def test_layout_distribution(self):
         lc = self.info["layout_counts"]
-        self.assertEqual(lc.get(12, 0), 7, "Inline icons + template")
-        self.assertEqual(lc.get(1003, 0), 45, "Packed refs")
+        self.assertEqual(lc.get(12, 0), 5, "Inline icons")
+        self.assertEqual(lc.get(1003, 0), 47, "Packed refs")
         self.assertEqual(lc.get(1004, 0), 7, "Packed assets")
         self.assertEqual(lc.get(1009, 0), 2, "Colors")
         self.assertEqual(lc.get(1010, 0), 1, "Multisize image")

@@ -547,15 +547,15 @@ class Rendition:
             if self.pixel_data:
                 tlv += make_bytes_per_row_tlv(self.width, self.pixel_format)
 
-        # Build rendition data — pad rows to match aligned_bytes_per_row.
-        # CoreUI always reads rows at 4-bpp stride regardless of pixel format,
-        # so GA8 (2 bpp) rows must be padded to the 4-bpp aligned stride.
+        # Build rendition data — pad rows to 32-byte alignment.
+        # For BGRA (4 bpp) and GA8 (2 bpp), rows are padded to the
+        # native bpp-based aligned stride.
         rend_data = b""
         if self.pixel_data:
             pixel_data = self.pixel_data
             actual_bpp = 4 if self.pixel_format == b"BGRA" else 2
             exact_bpr = self.width * actual_bpp
-            aligned_bpr = aligned_bytes_per_row(self.width, self.pixel_format)
+            aligned_bpr = ((exact_bpr + 31) // 32) * 32
             if aligned_bpr != exact_bpr and self.width > 0 and self.height > 0:
                 padded = bytearray()
                 pad = aligned_bpr - exact_bpr

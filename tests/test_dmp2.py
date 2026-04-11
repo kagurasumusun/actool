@@ -143,13 +143,13 @@ class TestMakeCelmDmp2(unittest.TestCase):
     """Test the CELM DMP2 envelope construction."""
 
     def test_celm_header_fields(self):
-        """CELM envelope has tag=MLEC, ver=2, comp=11."""
+        """CELM envelope has tag=MLEC, ver=0, comp=11."""
         fake_dmp2 = b"dmp2" + b"\x00" * 20
         celm = deepmap2.make_celm_dmp2(fake_dmp2, b"BGRA")
 
         self.assertEqual(celm[:4], b"MLEC")
         ver, comp, dlen = struct.unpack_from('<III', celm, 4)
-        self.assertEqual(ver, 2)
+        self.assertEqual(ver, 0)
         self.assertEqual(comp, 11)
         # dlen = 16 (sub-header) + len(fake_dmp2)
         self.assertEqual(dlen, 16 + len(fake_dmp2))
@@ -204,7 +204,7 @@ class TestCompressDataDmp2Selection(unittest.TestCase):
                                allow_dmp2=True)
         ver, comp = struct.unpack_from('<II', result, 4)
         self.assertEqual(comp, 11, "Expected DMP2 (comp=11)")
-        self.assertEqual(ver, 2, "Expected CELM ver=2 for DMP2")
+        self.assertEqual(ver, 0, "Expected CELM ver=0 for DMP2")
 
     def test_lzfse_used_for_standalone_at_11_0(self):
         """compress_data with allow_dmp2=False and target 11.0 uses LZFSE."""
@@ -336,15 +336,12 @@ class TestCarDmp2Layout(unittest.TestCase):
 
         for e in dmp2_entries:
             payload = e['celm_payload']
-            celm_ver = e.get('celm_ver', 2)
 
-            if celm_ver == 0:
+            if payload.startswith(b"dmp2"):
                 # Inline DMP2: raw dmp2 data without sub-header
-                self.assertTrue(payload.startswith(b"dmp2"),
-                                f"{e['name']}: inline DMP2 missing dmp2 magic, "
-                                f"got {payload[:4]!r}")
+                pass  # valid
             else:
-                # Atlas DMP2: sub-header + dmp2 data
+                # Atlas/non-inline DMP2: sub-header + dmp2 data
                 self.assertGreaterEqual(len(payload), 16,
                                         f"{e['name']}: payload too short")
                 sub_ver, sub_pf, sub_len, sub_zero = struct.unpack_from(
