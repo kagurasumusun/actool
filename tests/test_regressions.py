@@ -1988,12 +1988,38 @@ class TestCelmVersionForDmp2(unittest.TestCase):
                         })
         return results
 
+    def _make_alpha_catalog(self, tmpdir, names):
+        """Create a catalog with semi-transparent LA images (alpha != 255)."""
+        import json
+        catalog = os.path.join(tmpdir, "Test.xcassets")
+        os.makedirs(catalog, exist_ok=True)
+        with open(os.path.join(catalog, "Contents.json"), "w") as f:
+            json.dump({"info": {"author": "xcode", "version": 1}}, f)
+        for name in names:
+            iset = os.path.join(catalog, f"{name}.imageset")
+            os.makedirs(iset)
+            # Semi-transparent: alpha=180, not fully opaque
+            Image.new("LA", (16, 16), (128, 180)).save(
+                os.path.join(iset, f"{name}.png"))
+            Image.new("LA", (32, 32), (128, 180)).save(
+                os.path.join(iset, f"{name}@2x.png"))
+            with open(os.path.join(iset, "Contents.json"), "w") as f:
+                json.dump({
+                    "images": [
+                        {"filename": f"{name}.png", "idiom": "mac",
+                         "scale": "1x"},
+                        {"filename": f"{name}@2x.png", "idiom": "mac",
+                         "scale": "2x"},
+                    ],
+                    "info": {"author": "xcode", "version": 1},
+                }, f)
+        return catalog
+
     def test_macos_13_uses_celm_ver0(self):
         """macOS 13.0 target: DMP2 packed atlases use CELM ver=0."""
         tmpdir = tempfile.mkdtemp(prefix="actool_celm0_")
         try:
-            catalog, _ = make_temp_catalog(
-                [("A", "LA"), ("B", "LA"), ("C", "LA")], tmpdir)
+            catalog = self._make_alpha_catalog(tmpdir, ["A", "B", "C"])
             outdir = os.path.join(tmpdir, "out")
             compile_catalog(catalog, outdir, "macosx", "13.0")
             car_path = os.path.join(outdir, "Assets.car")
@@ -2012,8 +2038,7 @@ class TestCelmVersionForDmp2(unittest.TestCase):
         """macOS 11.0 target: DMP2 packed atlases use CELM ver=0."""
         tmpdir = tempfile.mkdtemp(prefix="actool_celm11_")
         try:
-            catalog, _ = make_temp_catalog(
-                [("A", "LA"), ("B", "LA"), ("C", "LA")], tmpdir)
+            catalog = self._make_alpha_catalog(tmpdir, ["A", "B", "C"])
             outdir = os.path.join(tmpdir, "out")
             compile_catalog(catalog, outdir, "macosx", "11.0")
             car_path = os.path.join(outdir, "Assets.car")

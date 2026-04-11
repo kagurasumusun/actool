@@ -550,8 +550,13 @@ def build_packed_asset_csi(name: str, width: int, height: int,
                            scale: int, pixel_format: bytes,
                            pixel_data: bytes,
                            min_deploy: str = "10.11",
-                           platform: str = "macosx") -> bytes:
-    """Build a CSI for a packed asset atlas (layout 1004)."""
+                           platform: str = "macosx",
+                           force_lzfse: bool = False) -> bytes:
+    """Build a CSI for a packed asset atlas (layout 1004).
+
+    force_lzfse: True to force LZFSE compression (e.g. for BGRA icon-only
+    atlases). Otherwise DMP2 is preferred when available.
+    """
     scale_factor = scale * 100
 
     # TLV section (packed assets: slices + blend + exif + bytes_per_row, NO metrics)
@@ -561,8 +566,9 @@ def build_packed_asset_csi(name: str, width: int, height: int,
     tlv += make_exif_orientation_tlv()
 
     # Compress the atlas pixel data.
-    # The system actool uses deepmap2 for both GA8 and BGRA packed atlases.
-    use_dmp2 = True
+    # The system actool uses DMP2 for GA8 atlases and BGRA atlases with
+    # non-icon images. BGRA icon-only atlases use LZFSE instead.
+    use_dmp2 = not force_lzfse
     rend_data = compress_data(pixel_data, pixel_format, width, height,
                               min_deploy=min_deploy, platform=platform,
                               allow_dmp2=use_dmp2)

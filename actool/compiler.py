@@ -144,6 +144,13 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
                     keyformat=keyformat_attrs,
                 )
 
+            # Determine atlas compression: the system actool uses DMP2 for
+            # GA8 atlases and BGRA atlases that contain non-icon images.
+            # BGRA atlases with only icon images use LZFSE instead.
+            all_icons = all(img.part == car.PART_ICON
+                            for img in atlas.images)
+            force_lzfse = (fmt == b"BGRA" and all_icons)
+
             atlas_csi = car.build_packed_asset_csi(
                 name=atlas_name,
                 width=atlas.width,
@@ -153,6 +160,7 @@ def compile_catalog(xcassets_path: str, output_dir: str, platform: str,
                 pixel_data=atlas.pixel_data,
                 min_deploy=min_deploy,
                 platform=platform,
+                force_lzfse=force_lzfse,
             )
             all_rendition_entries.append((atlas_key, atlas_csi))
 
