@@ -142,9 +142,11 @@ def is_failure(report: dict, min_psnr: float = 20.0) -> bool:
                     return True
         if section == "renditions" and diff.get("type") == "mismatches":
             for entry in diff.get("entries", []):
+                has_compression_diff = any(
+                    iss.get("field") == "compression"
+                    for iss in entry.get("issues", []))
                 for iss in entry.get("issues", []):
                     field = iss.get("field", "")
-                    a_val = iss.get("a")
                     b_val = iss.get("b")
                     # We don't implement the system's legacy compression
                     # formats (zlib comp=1, RLE comp=2, KCBC-chunked LZFSE).
@@ -153,6 +155,11 @@ def is_failure(report: dict, min_psnr: float = 20.0) -> bool:
                         continue
                     # Data size naturally differs with different compression
                     if field == "rend_size":
+                        continue
+                    # When compression differs, bpr alignment and opaque
+                    # flags may also differ as a side effect (e.g. DMP2
+                    # requires aligned bpr, uncompressed uses exact).
+                    if has_compression_diff and field in ("bpr", "is_opaque"):
                         continue
                     return True
         if section == "facets":

@@ -863,3 +863,68 @@ class TestLanguageDirection(unittest.TestCase):
         # Both LTR and RTL filenames should be present as renditions
         self.assertIn("Arrow-ltr.png", csi)
         self.assertIn("Arrow-rtl.png", csi)
+
+
+class TestOversizedImagesInline(unittest.TestCase):
+    """Images too large for atlas packing must be stored inline.
+
+    Regression: large images (wider than 258px or taller than 192px) were
+    packed into oversized atlases, while the system actool stores them
+    inline.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="actool_big_")
+        self.catalog = os.path.join(self.tmpdir, "Test.xcassets")
+        os.makedirs(self.catalog)
+        import json
+        with open(os.path.join(self.catalog, "Contents.json"), "w") as f:
+            json.dump({"info": {"author": "xcode", "version": 1}}, f)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def _add_imageset(self, name, width, height):
+        import json
+        iset = os.path.join(self.catalog, f"{name}.imageset")
+        os.makedirs(iset)
+        Image.new("RGBA", (width, height), (100, 50, 25, 255)).save(
+            os.path.join(iset, f"{name}.png"))
+        with open(os.path.join(iset, "Contents.json"), "w") as f:
+            json.dump({
+                "images": [
+                    {"filename": f"{name}.png", "idiom": "mac",
+                     "scale": "1x"},
+                ],
+                "info": {"author": "xcode", "version": 1},
+            }, f)
+
+    def test_wide_image_inline(self):
+        """Image wider than atlas max (262px) is stored inline."""
+        self._add_imageset("Wide", 400, 100)
+        self._add_imageset("Small", 16, 16)
+        outdir = os.path.join(self.tmpdir, "out")
+        compile_catalog(self.catalog, outdir, "macosx", "11.0")
+        csi = parse_car_csi_by_name(os.path.join(outdir, "Assets.car"))
+        self.assertEqual(csi["Wide.png"][0]["layout"], 12,
+                         "Wide image should be inline")
+
+    def test_tall_image_inline(self):
+        """Image taller than atlas max (196px) is stored inline."""
+        self._add_imageset("Tall", 100, 300)
+        self._add_imageset("Small", 16, 16)
+        outdir = os.path.join(self.tmpdir, "out")
+        compile_catalog(self.catalog, outdir, "macosx", "11.0")
+        csi = parse_car_csi_by_name(os.path.join(outdir, "Assets.car"))
+        self.assertEqual(csi["Tall.png"][0]["layout"], 12,
+                         "Tall image should be inline")
+
+    def test_fitting_image_packed(self):
+        """Image within atlas limits is packed normally."""
+        self._add_imageset("A", 100, 100)
+        self._add_imageset("B", 100, 100)
+        outdir = os.path.join(self.tmpdir, "out")
+        compile_catalog(self.catalog, outdir, "macosx", "11.0")
+        csi = parse_car_csi_by_name(os.path.join(outdir, "Assets.car"))
+        self.assertEqual(csi["A.png"][0]["layout"], 1003,
+                         "Fitting image should be packed")

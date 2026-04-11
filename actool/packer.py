@@ -281,6 +281,10 @@ def group_for_packing(renditions) -> tuple[list, list]:
 
     # Threshold: icon images >= 256px are stored inline
     ICON_INLINE_THRESHOLD = 256
+    # Atlas packing limits (images exceeding these go inline)
+    PACK_MAX_WIDTH = 262
+    PACK_MAX_HEIGHT = 196
+    PACK_MARGIN = 4  # 2px margin on each side
 
     for rend in renditions:
         # Multisize, color, and data renditions are always inline
@@ -294,6 +298,11 @@ def group_for_packing(renditions) -> tuple[list, list]:
             continue
         # Renditions with CSI overrides (pre-built) are always inline
         if hasattr(rend, '_csi_override'):
+            icon_renditions.append(rend)
+            continue
+        # Images too large for atlas packing are stored inline
+        if (rend.width > PACK_MAX_WIDTH - PACK_MARGIN or
+                rend.height > PACK_MAX_HEIGHT - PACK_MARGIN):
             icon_renditions.append(rend)
             continue
         # Group by format, scale, and sprite atlas
