@@ -159,9 +159,11 @@ def is_failure(report: dict, min_psnr: float = 20.0) -> bool:
                     if field == "rend_size":
                         continue
                     # RLE vs uncompressed is an encoder edge case
-                    if field == "compression" and {a_val, b_val} <= {
-                            "rle", "uncompressed"}:
-                        continue
+                    if field == "compression":
+                        comp_a = a_val.split("/")[0] if a_val else ""
+                        comp_b = b_val.split("/")[0] if b_val else ""
+                        if {comp_a, comp_b} <= {"rle", "uncompressed"}:
+                            continue
                     return True
         if section == "renditions" and diff.get("type") in (
                 "only_in_a", "only_in_b"):

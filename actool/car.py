@@ -561,8 +561,8 @@ def build_packed_asset_csi(name: str, width: int, height: int,
     tlv += make_exif_orientation_tlv()
 
     # Compress the atlas pixel data.
-    # Only GA8 packed atlases use deepmap2; BGRA atlases use KCBC LZFSE.
-    use_dmp2 = pixel_format == b" 8AG"
+    # The system actool uses deepmap2 for both GA8 and BGRA packed atlases.
+    use_dmp2 = True
     rend_data = compress_data(pixel_data, pixel_format, width, height,
                               min_deploy=min_deploy, platform=platform,
                               allow_dmp2=use_dmp2)

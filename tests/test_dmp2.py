@@ -373,8 +373,8 @@ class TestCarDmp2Layout(unittest.TestCase):
 
     @unittest.skipUnless(deepmap2.is_available(),
                          "vImage deepmap2 encoder not available")
-    def test_dmp2_ga8_atlases_only(self):
-        """Only GA8 atlases use deepmap2 at 11.0; BGRA uses KCBC LZFSE."""
+    def test_dmp2_both_atlas_formats(self):
+        """Both GA8 and BGRA atlases use deepmap2 at 11.0."""
         catalog, _ = make_temp_catalog(
             [("RgbA", "RGBA"), ("RgbB", "RGBA"),
              ("GrayA", "LA"), ("GrayB", "LA")],
@@ -387,12 +387,8 @@ class TestCarDmp2Layout(unittest.TestCase):
                    if e['layout'] == LAYOUT_NAME_LIST and 'celm_comp' in e]
         self.assertGreater(len(atlases), 0)
         for e in atlases:
-            if e.get('pixel_format') == b" 8AG":
-                self.assertEqual(e['celm_comp'], 11,
-                                 f"{e['name']}: GA8 atlas should use deepmap2")
-            elif e.get('pixel_format') == b"BGRA":
-                self.assertEqual(e['celm_comp'], 4,
-                                 f"{e['name']}: BGRA atlas should use KCBC")
+            self.assertEqual(e['celm_comp'], 11,
+                             f"{e['name']}: atlas should use deepmap2")
 
 
 # -- CoreUI rendering with DMP2 --
