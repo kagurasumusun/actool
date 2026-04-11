@@ -474,12 +474,21 @@ def build_packed_asset_csi(name: str, width: int, height: int,
     tlv = make_slices_tlv(0, 0)
     tlv += make_blend_opacity_tlv()
     tlv += make_exif_orientation_tlv()
-    tlv += make_bytes_per_row_tlv(width, pixel_format)
 
-    # Compress the atlas pixel data (DMP2 eligible for packed atlases)
+    # Compress the atlas pixel data (deepmap2 eligible for packed atlases).
     rend_data = compress_data(pixel_data, pixel_format, width, height,
                               min_deploy=min_deploy, platform=platform,
                               allow_dmp2=True)
+    # The BytesPerRow TLV must match the actual data stride.
+    # deepmap2 uses 4bpp-aligned stride; lzfse/zip use the atlas's
+    # native-bpp stride.  Detect which compressor was used.
+    actual_comp = struct.unpack_from('<I', rend_data, 8)[0] if len(rend_data) >= 12 else 0
+    if actual_comp == 11:  # deepmap2
+        bpr = aligned_bytes_per_row(width, pixel_format)
+    else:
+        # Native-bpp stride matching the atlas pixel data layout
+        bpr = len(pixel_data) // height if height > 0 else width * 4
+    tlv += struct.pack("<II", 0x03EF, 4) + struct.pack("<I", bpr)
 
     # GA8 images use colorspace 2 (gray gamma 2.2)
     cs_id = 2 if pixel_format == b" 8AG" else 1
