@@ -257,13 +257,23 @@ def main():
 
                 work_dir = os.path.join(
                     THIRD_PARTY, ".work", slug,
-                    short.replace(".xcassets", ""), deploy)
+                    short.replace(".xcassets", ""),
+                    f"macosx-{deploy}")
                 sys_dir = os.path.join(work_dir, "system")
                 our_dir = os.path.join(work_dir, "ours")
 
-                # Clean previous output
+                # Always start from a clean state so we never compare
+                # stale output from a previous run or deploy target.
                 if os.path.exists(work_dir):
                     shutil.rmtree(work_dir)
+                os.makedirs(work_dir)
+
+                # Write a sentinel before compilation so we can verify
+                # the car files were actually produced by this run.
+                sentinel = os.path.join(work_dir, ".run_started")
+                with open(sentinel, "w") as sf:
+                    sf.write(deploy)
+                run_start = os.path.getmtime(sentinel)
 
                 # Compile with system actool
                 if not compile_system(xcassets, sys_dir, deploy, app_icon):
@@ -289,6 +299,17 @@ def main():
                     print(f"  FAIL {label} (no Assets.car produced)")
                     failed += 1
                     failures.append((label, "no Assets.car"))
+                    continue
+
+                # Verify car files are from this run, not stale leftovers
+                stale = False
+                for car_path in (sys_car, our_car):
+                    if os.path.getmtime(car_path) < run_start:
+                        print(f"  ERROR {label} (stale {car_path})")
+                        errors += 1
+                        stale = True
+                        break
+                if stale:
                     continue
 
                 # Compare
