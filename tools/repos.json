@@ -10,5 +10,11 @@
     "paths": [
       "iina/Assets.xcassets"
     ]
+  },
+  {
+    "url": "https://github.com/rxhanson/Rectangle.git",
+    "paths": [
+      "Rectangle/Assets.xcassets"
+    ]
   }
 ]
