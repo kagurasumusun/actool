@@ -1131,9 +1131,9 @@ class TestKcbcChunkedLzfse(unittest.TestCase):
             shutil.rmtree(tmpdir)
 
     def test_1011_uses_kcbc(self):
-        """macOS 10.11 inline images use KCBC (CELM ver=1 comp=4)."""
+        """macOS 10.11 inline images use KCBC (CELM ver=3 comp=4)."""
         ver, comp, _, _ = self._compile_and_get_celm(64, 64)
-        self.assertEqual(ver, 1, "KCBC should use CELM ver=1")
+        self.assertEqual(ver, 3, "Inline KCBC should use CELM ver=3")
         self.assertEqual(comp, 4, "KCBC should use comp=4")
 
     def test_celm_payload_is_3(self):
@@ -2008,9 +2008,9 @@ class TestCelmVersionForDmp2(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir)
 
-    def test_macos_11_uses_celm_ver2(self):
-        """macOS 11.0 target: DMP2 packed atlases use CELM ver=2."""
-        tmpdir = tempfile.mkdtemp(prefix="actool_celm2_")
+    def test_macos_11_uses_celm_ver0(self):
+        """macOS 11.0 target: DMP2 packed atlases use CELM ver=0."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_celm11_")
         try:
             catalog, _ = make_temp_catalog(
                 [("A", "LA"), ("B", "LA"), ("C", "LA")], tmpdir)
@@ -2021,8 +2021,8 @@ class TestCelmVersionForDmp2(unittest.TestCase):
             self.assertGreater(len(celm_entries), 0,
                                "Should have DMP2 atlas entries")
             for entry in celm_entries:
-                self.assertEqual(entry["celm_version"], 2,
-                                 f"macOS 11.0 should use CELM ver=2, "
+                self.assertEqual(entry["celm_version"], 0,
+                                 f"macOS 11.0 should use CELM ver=0, "
                                  f"got ver={entry['celm_version']} "
                                  f"for {entry['name']}")
         finally:
