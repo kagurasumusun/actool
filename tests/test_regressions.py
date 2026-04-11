@@ -18,6 +18,7 @@ from actool.compiler import compile_catalog
 from tests.helpers import (
     make_temp_catalog, parse_car_info, parse_car_csi_by_name,
     has_extract_pixels, extract_car_image,
+    has_validate_car, validate_car_rendering,
     _read_car_blocks, _walk_tree_leaves,
 )
 
@@ -1847,5 +1848,276 @@ class TestDim1Keyformat(unittest.TestCase):
             kf = _parse_keyformat(os.path.join(outdir, "Assets.car"))
             self.assertIn(8, kf,
                           "Dim1 should be in keyformat for mixed formats")
+        finally:
+            shutil.rmtree(tmpdir)
+
+class TestGA8AtlasPacking(unittest.TestCase):
+    """GA8 atlas packing must use 2 bytes-per-pixel stride and positioning.
+
+    Regression: GA8 sub-images were positioned at 4-bpp byte offsets in the
+    atlas buffer, but vImage's deepmap2 encoder reads GA8 at 2 bpp. This
+    caused most of the GA8 atlas content to fall in the row padding region
+    and be silently dropped, producing garbled or missing icons.
+    """
+
+    def test_ga8_atlas_bytes_per_row(self):
+        """GA8 atlas uses 2-bpp stride (not 4-bpp) for bytes_per_row."""
+        from actool.packer import Atlas
+        atlas = Atlas(width=40, pixel_format=b" 8AG")
+        bpr = atlas.bytes_per_row
+        # 40 * 2 = 80, aligned to 32 → 96
+        self.assertEqual(bpr, 96,
+                         f"GA8 bpr should be 96 (40*2 aligned), got {bpr}")
+
+    def test_bgra_atlas_bytes_per_row(self):
+        """BGRA atlas uses 4-bpp stride for bytes_per_row."""
+        from actool.packer import Atlas
+        atlas = Atlas(width=40, pixel_format=b"BGRA")
+        bpr = atlas.bytes_per_row
+        # 40 * 4 = 160, aligned to 32 → 160
+        self.assertEqual(bpr, 160,
+                         f"BGRA bpr should be 160 (40*4 aligned), got {bpr}")
+
+    def test_ga8_atlas_render_pixel_placement(self):
+        """GA8 sub-images are placed at 2-bpp byte offsets, not 4-bpp.
+
+        Verifies that pixel data ends up at the correct position in the
+        atlas buffer: at byte offset x*2 (not x*4).
+        """
+        from actool.packer import Atlas, PackedImage
+
+        # Create a small GA8 atlas with a single image at x=4, y=0
+        img = PackedImage(
+            name="test", identifier=1,
+            width=4, height=2, x=4, y=0,
+            pixel_data=bytes([
+                100, 255, 101, 255, 102, 255, 103, 255,  # row 0
+                200, 128, 201, 128, 202, 128, 203, 128,  # row 1
+            ]),
+            pixel_format=b" 8AG",
+        )
+        atlas = Atlas(width=16, pixel_format=b" 8AG", images=[img])
+        atlas.height = 2
+        atlas.render()
+
+        bpr = atlas.bytes_per_row
+        # At x=4 with 2 bpp, data starts at byte offset 8 per row
+        # Row 0: bytes[8..16] should be the image data
+        row0_start = 4 * 2  # x * bpp
+        self.assertEqual(
+            atlas.pixel_data[row0_start:row0_start + 8],
+            bytes([100, 255, 101, 255, 102, 255, 103, 255]),
+            "GA8 row 0 pixels should be at byte offset x*2")
+
+        row1_start = bpr + 4 * 2
+        self.assertEqual(
+            atlas.pixel_data[row1_start:row1_start + 8],
+            bytes([200, 128, 201, 128, 202, 128, 203, 128]),
+            "GA8 row 1 pixels should be at byte offset x*2")
+
+    def test_ga8_packed_atlas_validates(self):
+        """Multiple GA8 images packed into an atlas render correctly.
+
+        This is a compile-and-validate test: create several grayscale images,
+        compile them (which packs into a GA8 atlas), then verify CoreUI can
+        render all of them.
+        """
+        tmpdir = tempfile.mkdtemp(prefix="actool_ga8pack_")
+        try:
+            catalog, _ = make_temp_catalog(
+                [("T1", "LA"), ("T2", "LA"), ("T3", "LA")], tmpdir)
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "13.0")
+            car_path = os.path.join(outdir, "Assets.car")
+            self.assertTrue(os.path.isfile(car_path))
+
+            # Verify GA8 atlases exist
+            csi = parse_car_csi_by_name(car_path)
+            atlas_entries = [
+                e for entries in csi.values() for e in entries
+                if e["layout"] == 1004 and e["pixel_format"] == b" 8AG"
+            ]
+            self.assertGreater(len(atlas_entries), 0,
+                               "Should have GA8 packed atlas(es)")
+        finally:
+            shutil.rmtree(tmpdir)
+
+    @unittest.skipUnless(has_validate_car(), "validate_car tool not built")
+    def test_ga8_packed_atlas_renders(self):
+        """GA8 packed atlas images can be rendered by CoreUI without errors."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_ga8rend_")
+        try:
+            catalog, _ = make_temp_catalog(
+                [("T1", "LA"), ("T2", "LA"), ("T3", "LA")], tmpdir)
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "13.0")
+            car_path = os.path.join(outdir, "Assets.car")
+            ok, fail, details = validate_car_rendering(car_path)
+            failed_names = [name for status, name in details if status != "OK"]
+            self.assertEqual(fail, 0,
+                             f"GA8 atlas renditions failed: {failed_names}")
+        finally:
+            shutil.rmtree(tmpdir)
+
+
+class TestCelmVersionForDmp2(unittest.TestCase):
+    """DMP2-compressed packed atlases must use the correct CELM version.
+
+    Regression: CELM ver=2 was always used, but CoreUI on macOS 14 decodes
+    ver=2 GA8 atlases as kCGImageAlphaNoneSkipLast, dropping the alpha
+    channel. macOS 13+ targets must use CELM ver=0.
+    """
+
+    def _get_atlas_celm_versions(self, car_path):
+        """Extract CELM version from all DMP2-compressed atlas renditions."""
+        csi = parse_car_csi_by_name(car_path)
+        results = []
+        for name, entries in csi.items():
+            for e in entries:
+                if e["layout"] != 1004:
+                    continue
+                rend = e["rend"]
+                if len(rend) >= 16 and rend[:4] == b"MLEC":
+                    ver = struct.unpack('<I', rend[4:8])[0]
+                    comp = struct.unpack('<I', rend[8:12])[0]
+                    if comp == 11:  # DMP2
+                        results.append({
+                            "name": name,
+                            "pixel_format": e["pixel_format"],
+                            "celm_version": ver,
+                        })
+        return results
+
+    def test_macos_13_uses_celm_ver0(self):
+        """macOS 13.0 target: DMP2 packed atlases use CELM ver=0."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_celm0_")
+        try:
+            catalog, _ = make_temp_catalog(
+                [("A", "LA"), ("B", "LA"), ("C", "LA")], tmpdir)
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "13.0")
+            car_path = os.path.join(outdir, "Assets.car")
+            celm_entries = self._get_atlas_celm_versions(car_path)
+            self.assertGreater(len(celm_entries), 0,
+                               "Should have DMP2 atlas entries")
+            for entry in celm_entries:
+                self.assertEqual(entry["celm_version"], 0,
+                                 f"macOS 13+ should use CELM ver=0, "
+                                 f"got ver={entry['celm_version']} "
+                                 f"for {entry['name']}")
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_macos_11_uses_celm_ver2(self):
+        """macOS 11.0 target: DMP2 packed atlases use CELM ver=2."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_celm2_")
+        try:
+            catalog, _ = make_temp_catalog(
+                [("A", "LA"), ("B", "LA"), ("C", "LA")], tmpdir)
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "11.0")
+            car_path = os.path.join(outdir, "Assets.car")
+            celm_entries = self._get_atlas_celm_versions(car_path)
+            self.assertGreater(len(celm_entries), 0,
+                               "Should have DMP2 atlas entries")
+            for entry in celm_entries:
+                self.assertEqual(entry["celm_version"], 2,
+                                 f"macOS 11.0 should use CELM ver=2, "
+                                 f"got ver={entry['celm_version']} "
+                                 f"for {entry['name']}")
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_macos_14_uses_celm_ver0(self):
+        """macOS 14.0 target: DMP2 packed atlases also use CELM ver=0."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_celm14_")
+        try:
+            catalog, _ = make_temp_catalog(
+                [("A", "LA"), ("B", "LA"), ("C", "LA")], tmpdir)
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(catalog, outdir, "macosx", "14.0")
+            car_path = os.path.join(outdir, "Assets.car")
+            celm_entries = self._get_atlas_celm_versions(car_path)
+            for entry in celm_entries:
+                self.assertEqual(entry["celm_version"], 0,
+                                 f"macOS 14+ should use CELM ver=0")
+        finally:
+            shutil.rmtree(tmpdir)
+
+
+RECTANGLE_XCASSETS = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    "third_party", "Rectangle", "Rectangle", "Assets.xcassets")
+
+
+@unittest.skipUnless(os.path.isdir(RECTANGLE_XCASSETS),
+                     "Rectangle third-party assets not available")
+class TestRectangleAssets(unittest.TestCase):
+    """Compile Rectangle's Assets.xcassets and validate all renditions.
+
+    Rectangle uses template (grayscale+alpha) images for window layout
+    icons, which get packed into GA8 atlases. This is the exact scenario
+    that triggered the GA8 stride and CELM version bugs.
+    """
+
+    @unittest.skipUnless(has_validate_car(), "validate_car tool not built")
+    def test_rectangle_all_renditions_render(self):
+        """All Rectangle renditions render successfully via CoreUI."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_rect_")
+        try:
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(RECTANGLE_XCASSETS, outdir, "macosx", "13.0")
+            car_path = os.path.join(outdir, "Assets.car")
+            self.assertTrue(os.path.isfile(car_path))
+
+            ok, fail, details = validate_car_rendering(car_path)
+            failed_names = [name for status, name in details if status != "OK"]
+            self.assertEqual(fail, 0,
+                             f"Rectangle renditions failed: {failed_names}")
+            self.assertGreater(ok, 0, "Should have rendered some images")
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_rectangle_has_ga8_atlases(self):
+        """Rectangle compilation produces GA8 packed atlases."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_rect_ga8_")
+        try:
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(RECTANGLE_XCASSETS, outdir, "macosx", "13.0")
+            car_path = os.path.join(outdir, "Assets.car")
+
+            csi = parse_car_csi_by_name(car_path)
+            ga8_atlases = [
+                e for entries in csi.values() for e in entries
+                if e["layout"] == 1004 and e["pixel_format"] == b" 8AG"
+            ]
+            self.assertGreater(len(ga8_atlases), 0,
+                               "Rectangle should produce GA8 atlases "
+                               "(template images are grayscale+alpha)")
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_rectangle_ga8_atlas_celm_ver0(self):
+        """Rectangle's GA8 atlases use CELM ver=0 at macOS 13+ target."""
+        tmpdir = tempfile.mkdtemp(prefix="actool_rect_celm_")
+        try:
+            outdir = os.path.join(tmpdir, "out")
+            compile_catalog(RECTANGLE_XCASSETS, outdir, "macosx", "13.0")
+            car_path = os.path.join(outdir, "Assets.car")
+
+            csi = parse_car_csi_by_name(car_path)
+            for name, entries in csi.items():
+                for e in entries:
+                    if e["layout"] != 1004:
+                        continue
+                    rend = e["rend"]
+                    if len(rend) >= 16 and rend[:4] == b"MLEC":
+                        ver = struct.unpack('<I', rend[4:8])[0]
+                        comp = struct.unpack('<I', rend[8:12])[0]
+                        if comp == 11:  # DMP2
+                            self.assertEqual(
+                                ver, 0,
+                                f"{name}: CELM ver should be 0 for "
+                                f"macOS 13+, got {ver}")
         finally:
             shutil.rmtree(tmpdir)
