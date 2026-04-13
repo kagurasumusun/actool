@@ -58,6 +58,7 @@ LAYOUT_MULTISIZE_IMAGE = 1010
 # Pixel format for raw data
 PIXELFMT_DATA = b"ATAD"  # 'DATA' as LE uint32
 PIXELFMT_PDF = b" FDP"   # 'PDF ' as LE uint32
+PIXELFMT_SVG = b" GVS"   # 'SVG ' as LE uint32
 
 
 def compute_keyformat(renditions, force_dim1: bool = False) -> list[int]:
@@ -690,6 +691,35 @@ def build_pdf_csi(filename: str, pdf_data: bytes) -> bytes:
     )
 
 
+def build_svg_csi(filename: str, svg_data: bytes) -> bytes:
+    """Build a CSI for an SVG image rendition (layout 9).
+
+    The host actool lzvn-compresses SVG data when it reduces size.
+    """
+    stored = svg_data
+    is_compressed = 0
+    if HAS_LZFSE:
+        compressed = lzfse.compress(svg_data)
+        if len(compressed) < len(svg_data):
+            stored = compressed
+            is_compressed = 1
+    rawd = struct.pack("<4sII", b"DWAR", is_compressed, len(stored))
+    rawd += stored
+
+    tlv = make_blend_opacity_tlv()
+    tlv += make_exif_orientation_tlv()
+
+    return build_csi(
+        width=0, height=0, scale_factor=0,
+        pixel_format=PIXELFMT_SVG,
+        layout=LAYOUT_PDF, name=filename,
+        tlv_data=tlv, rendition_data=rawd,
+        rendition_flags=0x04,
+        colorspace_id=0,
+        bitmaplist_unknown=1,
+    )
+
+
 @dataclass
 class Rendition:
     """A single rendition (image/asset) in the CAR file."""
@@ -712,6 +742,7 @@ class Rendition:
     colorspace_id: int = 1
     locale: str = ""  # Empty = non-localized, "en"/"fr"/etc = localized
     sprite_atlas_id: int = 0  # Non-zero = belongs to a sprite atlas
+    is_svg_rasterization: bool = False  # Rasterized from SVG vector source
 
     has_icon: bool = True
     keyformat: list[int] = None  # Dynamic keyformat tokens
@@ -815,6 +846,8 @@ class Rendition:
         if intent < 0:  # auto-detect from is_template / default
             intent = 2 if self.is_template else 4
         flags = intent << 2
+        if self.is_svg_rasterization:
+            flags |= 0x04
         # Note: the isOpaque flag (bit 1) is never set by the system
         # actool, even for fully-opaque images.  We match that behaviour.
 

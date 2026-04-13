@@ -58,76 +58,139 @@ def compile_icon_bundle(icon_path: str, output_dir: str, platform: str,
     with open(bundle_path / "icon.json") as f:
         icon_json = json.load(f)
 
-    # Find the source image
-    source_image = _find_source_image(bundle_path, icon_json)
-    if not source_image:
+    # Find all source images from the bundle layers
+    source_images = _find_all_source_images(bundle_path, icon_json)
+    if not source_images:
         warnings_list.append({
             "description": f"No source image found in {icon_path}"
         })
         return []
 
-    # Load source image
-    src_img = Image.open(source_image).convert("RGBA")
+    has_svg = any(p.lower().endswith(".svg") for p in source_images)
 
-    # Generate resized icons as temporary files
-    import tempfile
-    tmpdir = tempfile.mkdtemp(prefix="actool_icon_")
-    icon_images = []
+    output_files = []
 
-    try:
-        for point_size, scale in ICON_SIZES:
-            pixel_size = point_size * scale
-            resized = src_img.resize((pixel_size, pixel_size), Image.LANCZOS)
-            filename = f"Icon{pixel_size}x{pixel_size}.png"
-            filepath = os.path.join(tmpdir, filename)
-            resized.save(filepath, format="PNG")
-            icon_images.append((filepath, pixel_size, scale))
-
-        output_files = []
-
-        # Generate ICNS
-        if standalone_icon_behavior != "none":
-            icns_path = os.path.join(output_dir, f"{icon_name}.icns")
-            create_icns(icon_images, icns_path)
-            if os.path.exists(icns_path):
-                output_files.append(os.path.abspath(icns_path))
-
-        # Generate CAR file
+    if has_svg:
+        # SVG-based bundles: store each SVG as raw data
         car_path = os.path.join(output_dir, "Assets.car")
-        _build_icon_car(car_path, icon_name, icon_images, src_img,
-                        platform, min_deploy)
+        _build_svg_icon_car(car_path, icon_name, source_images,
+                            platform, min_deploy)
         output_files.append(os.path.abspath(car_path))
+    else:
+        # Raster-based bundles: resize single source into standard sizes
+        src_img = Image.open(source_images[0]).convert("RGBA")
 
-        # Generate partial info plist
-        if info_plist_path:
-            _write_icon_plist(info_plist_path, icon_name, accent_color,
-                              notices_list)
-            output_files.append(os.path.abspath(info_plist_path))
+        import tempfile
+        tmpdir = tempfile.mkdtemp(prefix="actool_icon_")
+        icon_images = []
 
-        return output_files
+        try:
+            for point_size, scale in ICON_SIZES:
+                pixel_size = point_size * scale
+                resized = src_img.resize((pixel_size, pixel_size),
+                                         Image.LANCZOS)
+                filename = f"Icon{pixel_size}x{pixel_size}.png"
+                filepath = os.path.join(tmpdir, filename)
+                resized.save(filepath, format="PNG")
+                icon_images.append((filepath, pixel_size, scale))
 
-    finally:
-        # Clean up temp files
-        import shutil
-        shutil.rmtree(tmpdir, ignore_errors=True)
+            # Generate ICNS
+            if standalone_icon_behavior != "none":
+                icns_path = os.path.join(output_dir, f"{icon_name}.icns")
+                create_icns(icon_images, icns_path)
+                if os.path.exists(icns_path):
+                    output_files.append(os.path.abspath(icns_path))
+
+            # Generate CAR file
+            car_path = os.path.join(output_dir, "Assets.car")
+            _build_icon_car(car_path, icon_name, icon_images, src_img,
+                            platform, min_deploy)
+            output_files.append(os.path.abspath(car_path))
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    # Generate partial info plist
+    if info_plist_path:
+        _write_icon_plist(info_plist_path, icon_name, accent_color,
+                          notices_list)
+        output_files.append(os.path.abspath(info_plist_path))
+
+    return output_files
 
 
-def _find_source_image(bundle_path: Path, icon_json: dict) -> str:
-    """Find the source image in the .icon bundle."""
-    # Check layers in groups for image references
+def _find_all_source_images(bundle_path: Path, icon_json: dict) -> list[str]:
+    """Find all source images referenced by layers in the .icon bundle."""
+    images = []
+    seen = set()
     for group in icon_json.get("groups", []):
         for layer in group.get("layers", []):
             image_name = layer.get("image-name")
-            if image_name:
-                # Look in Assets directory
-                assets_path = bundle_path / "Assets" / image_name
-                if assets_path.exists():
-                    return str(assets_path)
-                # Look in bundle root
-                root_path = bundle_path / image_name
-                if root_path.exists():
-                    return str(root_path)
-    return None
+            if not image_name or image_name in seen:
+                continue
+            seen.add(image_name)
+            # Look in Assets directory first, then bundle root
+            assets_path = bundle_path / "Assets" / image_name
+            if assets_path.exists():
+                images.append(str(assets_path))
+                continue
+            root_path = bundle_path / image_name
+            if root_path.exists():
+                images.append(str(root_path))
+    return images
+
+
+def _build_svg_icon_car(car_path: str, icon_name: str, svg_paths: list[str],
+                        platform: str, min_deploy: str):
+    """Build a CAR file from SVG icon layers stored as raw data."""
+    from .name_hash import hash_name
+
+    ident = hash_name(icon_name)
+    renditions = []
+
+    for layer_idx, svg_path in enumerate(svg_paths):
+        filename = os.path.basename(svg_path)
+        with open(svg_path, "rb") as f:
+            svg_data = f.read()
+
+        csi = car.build_svg_csi(filename, svg_data)
+        rend = car.Rendition(
+            name=filename,
+            identifier=ident,
+            element=car.ELEMENT_UNIVERSAL,
+            part=car.PART_ICON,
+            scale=1,
+            dim2=layer_idx + 1,
+            layout=car.LAYOUT_PDF,
+            pixel_format=car.PIXELFMT_SVG,
+        )
+        rend._csi_override = csi
+        renditions.append(rend)
+
+    # Build rendition entries
+    all_entries = []
+    for rend in renditions:
+        key = rend.build_rendition_key()
+        csi = rend._csi_override
+        all_entries.append((key, csi))
+
+    all_entries.sort(key=lambda e: e[0])
+
+    # Build BOM file
+    bom = BOMWriter()
+    bom.add_named_block("CARHEADER", car.make_carheader(len(all_entries)))
+    bom.add_named_block("KEYFORMAT", car.make_keyformat(
+        car.KEYFORMAT_ATTRS_ICON))
+    bom.add_named_block("EXTENDED_METADATA",
+                        car.make_extended_metadata(platform, min_deploy))
+
+    facetkey_entries = [(icon_name.encode("ascii"),
+                         car.make_facetkey_value(car.ELEMENT_UNIVERSAL,
+                                                car.PART_ICON, ident))]
+    bom.add_tree("FACETKEYS", facetkey_entries)
+    bom.add_tree("RENDITIONS", all_entries)
+    bom.add_tree("BITMAPKEYS", [])
+    bom.write(car_path)
 
 
 def _build_icon_car(car_path: str, icon_name: str, icon_images: list,

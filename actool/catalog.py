@@ -66,6 +66,30 @@ def _premultiply_ga8(data: bytes) -> bytes:
     return bytes(buf)
 
 
+def _bgra_to_best_format(bgra_data: bytes, width: int, height: int,
+                         force_bgra: bool = False,
+                         ) -> tuple[bytes, int, int, bytes]:
+    """Convert BGRA pixel data to the best format (GA8 if grayscale).
+
+    Input must be premultiplied-alpha BGRA. Returns
+    (pixel_data, width, height, pixel_format).
+    """
+    buf = bgra_data
+    if not force_bgra:
+        is_gray = True
+        for i in range(0, len(buf) - 3, 4):
+            if not (buf[i] == buf[i + 1] == buf[i + 2]):
+                is_gray = False
+                break
+        if is_gray:
+            ga = bytearray(width * height * 2)
+            for i in range(width * height):
+                ga[i * 2] = buf[i * 4]      # B == G == R
+                ga[i * 2 + 1] = buf[i * 4 + 3]  # A
+            return bytes(ga), width, height, b" 8AG"
+    return buf, width, height, b"BGRA"
+
+
 def load_image_as_bgra(path: str,
                        force_bgra: bool = False,
                        ) -> tuple[bytes, int, int, bytes]:
@@ -354,6 +378,63 @@ class AssetCatalog:
                 renditions.append(rend)
                 continue
 
+            # SVG files: store raw vector AND rasterized versions
+            if filename.lower().endswith(".svg"):
+                with open(img_path, "rb") as svg_f:
+                    svg_data = svg_f.read()
+
+                # Raw vector rendition
+                csi = car.build_svg_csi(filename, svg_data)
+                vec_rend = car.Rendition(
+                    name=filename,
+                    identifier=ident,
+                    element=car.ELEMENT_UNIVERSAL,
+                    part=car.PART_REGULAR,
+                    scale=1,
+                    appearance=appearance,
+                    direction=direction,
+                    layout=car.LAYOUT_PDF,
+                    pixel_format=car.PIXELFMT_SVG,
+                )
+                vec_rend._csi_override = csi
+                renditions.append(vec_rend)
+
+                # Rasterized renditions at 1x and 2x
+                from .svg_raster import HAS_CORESVG, rasterize_svg, \
+                    _parse_svg_dimensions
+                if HAS_CORESVG:
+                    svg_w, svg_h = _parse_svg_dimensions(svg_data)
+                    if svg_w and svg_h:
+                        for raster_scale in (1, 2):
+                            pixel_data = rasterize_svg(
+                                svg_data, svg_w, svg_h, raster_scale)
+                            pw = svg_w * raster_scale
+                            ph = svg_h * raster_scale
+                            pixel_data, pw, ph, pixel_format = \
+                                _bgra_to_best_format(
+                                    pixel_data, pw, ph, self._force_bgra)
+                            rend = car.Rendition(
+                                name=filename,
+                                identifier=ident,
+                                element=car.ELEMENT_UNIVERSAL,
+                                part=car.PART_REGULAR,
+                                scale=raster_scale,
+                                width=pw,
+                                height=ph,
+                                pixel_data=pixel_data,
+                                pixel_format=pixel_format,
+                                appearance=appearance,
+                                direction=direction,
+                                layout=car.LAYOUT_ONE_PART_SCALE,
+                                template_rendering_intent=template_intent,
+                                is_svg_rasterization=True,
+                                locale=locale,
+                                colorspace_id=(2 if pixel_format == b" 8AG"
+                                               else 1),
+                            )
+                            renditions.append(rend)
+                continue
+
             pixel_data, width, height, pixel_format = load_image_as_bgra(
                 str(img_path), force_bgra=self._force_bgra)
 
@@ -414,6 +495,71 @@ class AssetCatalog:
             # Skip images targeted at other platforms
             img_platform = img_info.get("platform", "")
             if img_platform and img_platform != self.platform:
+                continue
+
+            # SVG files: store raw vector AND rasterized versions
+            if filename.lower().endswith(".svg"):
+                with open(img_path, "rb") as svg_f:
+                    svg_data = svg_f.read()
+
+                scale_str = img_info.get("scale", "1x")
+                scale = int(scale_str.replace("x", ""))
+                size_str = img_info.get("size", "")
+                if "x" in size_str:
+                    point_w = int(size_str.split("x")[0])
+                else:
+                    point_w = 0
+                dim2 = ICON_DIM2_MAP.get(point_w, 0)
+
+                # Raw vector rendition
+                csi = car.build_svg_csi(filename, svg_data)
+                vec_rend = car.Rendition(
+                    name=filename,
+                    identifier=ident,
+                    element=car.ELEMENT_UNIVERSAL,
+                    part=car.PART_ICON,
+                    scale=1,
+                    dim2=dim2,
+                    layout=car.LAYOUT_PDF,
+                    pixel_format=car.PIXELFMT_SVG,
+                )
+                vec_rend._csi_override = csi
+                renditions.append(vec_rend)
+
+                # Rasterized renditions at 1x and 2x
+                from .svg_raster import HAS_CORESVG, rasterize_svg, \
+                    _parse_svg_dimensions
+                if HAS_CORESVG and point_w:
+                    svg_w, svg_h = _parse_svg_dimensions(svg_data)
+                    if not svg_w:
+                        svg_w = svg_h = point_w
+                    for raster_scale in (1, 2):
+                        pixel_data = rasterize_svg(svg_data, svg_w, svg_h,
+                                                   raster_scale)
+                        pw = svg_w * raster_scale
+                        ph = svg_h * raster_scale
+                        pixel_data, pw, ph, pixel_format = \
+                            _bgra_to_best_format(
+                                pixel_data, pw, ph, self._force_bgra)
+                        rend = car.Rendition(
+                            name=filename,
+                            identifier=ident,
+                            element=car.ELEMENT_UNIVERSAL,
+                            part=car.PART_ICON,
+                            scale=raster_scale,
+                            width=pw,
+                            height=ph,
+                            pixel_data=pixel_data,
+                            pixel_format=pixel_format,
+                            layout=car.LAYOUT_ONE_PART_SCALE,
+                            dim2=dim2,
+                            template_rendering_intent=0,
+                            is_svg_rasterization=True,
+                            colorspace_id=2 if pixel_format == b" 8AG" else 1,
+                        )
+                        renditions.append(rend)
+                        icon_renditions.append((rend, point_w,
+                                                point_w * raster_scale))
                 continue
 
             scale_str = img_info.get("scale", "1x")
@@ -798,6 +944,8 @@ class AssetCatalog:
                 continue
             img_path = icon_dir / filename
             if not img_path.exists():
+                continue
+            if filename.lower().endswith(".svg"):
                 continue
 
             scale_str = img_info.get("scale", "1x")
