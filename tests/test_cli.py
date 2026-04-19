@@ -113,5 +113,52 @@ class TestCompile(unittest.TestCase):
             shutil.rmtree(tmpdir)
 
 
+class TestExportDependencyInfo(unittest.TestCase):
+
+    def test_dependency_info_format(self):
+        """--export-dependency-info writes binary dep info."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            outdir = os.path.join(tmpdir, "out")
+            depfile = os.path.join(tmpdir, "deps.d")
+            plist_path = os.path.join(tmpdir, "Info.plist")
+            run_actool(
+                "--compile", outdir, "--platform", "macosx",
+                "--minimum-deployment-target", "11.0",
+                "--app-icon", "AppIcon",
+                "--output-partial-info-plist", plist_path,
+                "--export-dependency-info", depfile,
+                REF_XCASSETS)
+            self.assertTrue(os.path.exists(depfile))
+            with open(depfile, "rb") as f:
+                data = f.read()
+            # Version record: \x00 + "actool-..." + \x00
+            self.assertEqual(data[0:1], b"\x00")
+            self.assertIn(b"actool-", data)
+            # Input record: \x10 + path
+            self.assertIn(b"\x10", data)
+            abs_input = os.path.abspath(REF_XCASSETS).encode()
+            self.assertIn(abs_input, data)
+            # Output records: \x40 + path
+            self.assertIn(b"\x40", data)
+            self.assertIn(b"Assets.car", data)
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_no_dependency_info_by_default(self):
+        """Without --export-dependency-info, no dep file is written."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            outdir = os.path.join(tmpdir, "out")
+            depfile = os.path.join(tmpdir, "deps.d")
+            run_actool(
+                "--compile", outdir, "--platform", "macosx",
+                "--minimum-deployment-target", "11.0",
+                REF_XCASSETS)
+            self.assertFalse(os.path.exists(depfile))
+        finally:
+            shutil.rmtree(tmpdir)
+
+
 if __name__ == "__main__":
     unittest.main()

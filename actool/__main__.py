@@ -6,6 +6,7 @@ CLI-compatible reimplementation of Apple's actool for compiling xcassets.
 
 import argparse
 import json
+import os
 import plistlib
 import sys
 
@@ -86,6 +87,23 @@ def _print_hr_array(items, indent):
             print(f"{prefix}{_hr_format_value(item)}")
 
 
+def _write_dependency_info(path: str, xcassets_path: str,
+                           output_files: list[str]):
+    """Write binary dependency info in Apple's format.
+
+    Format: version record, then input/output records, each null-terminated.
+    - 0x00 + "actool-{version}" + 0x00  (version)
+    - 0x10 + input_path + 0x00          (per input)
+    - 0x40 + output_path + 0x00         (per output)
+    """
+    with open(path, "wb") as f:
+        f.write(b"\x00" + f"actool-{BUNDLE_VERSION}".encode() + b"\x00")
+        abs_input = os.path.abspath(xcassets_path)
+        f.write(b"\x10" + abs_input.encode() + b"\x00")
+        for out in output_files:
+            f.write(b"\x40" + out.encode() + b"\x00")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="actool",
@@ -161,6 +179,10 @@ def main():
                         default="YES",
                         help="Include CFBundleLocalizations in partial plist")
 
+    # Dependency info
+    parser.add_argument("--export-dependency-info", metavar="PATH",
+                        help="Write Makefile-style dependency info to PATH")
+
     # Listing
     parser.add_argument("--print-contents", action="store_true",
                         help="List the catalog's content in the output")
@@ -227,6 +249,10 @@ def main():
         except Exception as e:
             errors.append({"description": str(e)})
 
+        if args.export_dependency_info:
+            _write_dependency_info(args.export_dependency_info,
+                                   args.document, output_files)
+
         # Output results
         if args.output_format == "human-readable-text":
             results_data = {"com.apple.actool.compilation-results": output_files}
@@ -267,6 +293,10 @@ def main():
         )
     except Exception as e:
         errors.append({"description": str(e)})
+
+    if args.export_dependency_info:
+        _write_dependency_info(args.export_dependency_info,
+                               args.document, output_files)
 
     # Output compilation results
     if args.output_format == "human-readable-text":
