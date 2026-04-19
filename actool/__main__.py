@@ -185,6 +185,10 @@ def main():
     # Dependency info
     parser.add_argument("--export-dependency-info", metavar="PATH",
                         help="Write Makefile-style dependency info to PATH")
+    parser.add_argument("--generate-objc-asset-symbols", metavar="PATH",
+                        help="Write an Objective-C header exposing asset "
+                             "names as string constants. Requires "
+                             "--bundle-identifier; skips CAR compilation.")
 
     # Listing
     parser.add_argument("--print-contents", action="store_true",
@@ -224,6 +228,28 @@ def main():
     # --compile is required for actual work
     if not args.compile:
         parser.error("--compile is required")
+
+    # --generate-objc-asset-symbols together with --bundle-identifier replaces
+    # normal compilation: only the header file is produced.
+    if args.generate_objc_asset_symbols and args.bundle_identifier:
+        from .symbols import generate_symbols_header
+        generate_symbols_header(
+            xcassets_path=args.document,
+            output_path=args.generate_objc_asset_symbols,
+            bundle_identifier=args.bundle_identifier,
+            platform=args.platform,
+        )
+        output_files = [os.path.abspath(args.generate_objc_asset_symbols)]
+        if args.export_dependency_info:
+            _write_dependency_info(args.export_dependency_info,
+                                   args.document, output_files)
+        if args.output_format == "human-readable-text":
+            results_data = {"com.apple.actool.compilation-results": output_files}
+        else:
+            results_data = {"com.apple.actool.compilation-results": {
+                "output-files": output_files}}
+        _output_plist(results_data, args.output_format)
+        return
 
     warnings = []
     errors = []

@@ -137,6 +137,61 @@ class TestCompile(unittest.TestCase):
             shutil.rmtree(tmpdir)
 
 
+class TestGenerateObjCSymbols(unittest.TestCase):
+
+    def test_symbols_header_generated(self):
+        """--generate-objc-asset-symbols + --bundle-identifier writes header."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            outdir = os.path.join(tmpdir, "out")
+            syms = os.path.join(tmpdir, "syms.h")
+            stdout, _, rc = run_actool(
+                "--compile", outdir, "--platform", "macosx",
+                "--minimum-deployment-target", "11.0",
+                "--app-icon", "AppIcon",
+                "--output-partial-info-plist",
+                os.path.join(tmpdir, "Info.plist"),
+                "--generate-objc-asset-symbols", syms,
+                "--bundle-identifier", "com.example.myapp",
+                REF_XCASSETS)
+            self.assertEqual(rc, 0)
+            # No CAR in this mode
+            self.assertFalse(os.path.exists(os.path.join(outdir, "Assets.car")))
+            self.assertTrue(os.path.exists(syms))
+            content = open(syms).read()
+            self.assertIn("#import <Foundation/Foundation.h>", content)
+            self.assertIn('ACBundleID AC_SWIFT_PRIVATE = @"com.example.myapp"',
+                          content)
+            self.assertIn('ACColorNameTestAccent', content)
+            self.assertIn('ACImageNameImg001', content)
+            self.assertIn('ACImageNameTemplateIcon', content)
+            self.assertNotIn('AppIcon', content)
+            # Results output lists only the header
+            data = plistlib.loads(stdout.encode())
+            files = data["com.apple.actool.compilation-results"]["output-files"]
+            self.assertEqual(len(files), 1)
+            self.assertTrue(files[0].endswith("syms.h"))
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_symbols_ignored_without_bundle_id(self):
+        """Without --bundle-identifier, --generate-objc-asset-symbols is a no-op."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            outdir = os.path.join(tmpdir, "out")
+            syms = os.path.join(tmpdir, "syms.h")
+            _, _, rc = run_actool(
+                "--compile", outdir, "--platform", "macosx",
+                "--minimum-deployment-target", "11.0",
+                "--generate-objc-asset-symbols", syms,
+                REF_XCASSETS)
+            self.assertEqual(rc, 0)
+            self.assertFalse(os.path.exists(syms))
+            self.assertTrue(os.path.exists(os.path.join(outdir, "Assets.car")))
+        finally:
+            shutil.rmtree(tmpdir)
+
+
 class TestExportDependencyInfo(unittest.TestCase):
 
     def test_dependency_info_format(self):
