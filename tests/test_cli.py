@@ -174,6 +174,41 @@ class TestGenerateObjCSymbols(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir)
 
+    def test_symbol_index_generated(self):
+        """--generate-asset-symbol-index writes a plist index alongside header."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            outdir = os.path.join(tmpdir, "out")
+            syms = os.path.join(tmpdir, "syms.h")
+            index = os.path.join(tmpdir, "index.json")
+            _, _, rc = run_actool(
+                "--compile", outdir, "--platform", "macosx",
+                "--minimum-deployment-target", "11.0",
+                "--generate-objc-asset-symbols", syms,
+                "--generate-asset-symbol-index", index,
+                "--bundle-identifier", "com.example.myapp",
+                REF_XCASSETS)
+            self.assertEqual(rc, 0)
+            self.assertTrue(os.path.exists(index))
+            with open(index, "rb") as f:
+                data = plistlib.load(f)
+            self.assertIn("images", data)
+            self.assertIn("colors", data)
+            self.assertIn("symbols", data)
+            # At least the TestAccent color and some images are listed
+            color_names = [e["objcSymbol"] for e in data["colors"]]
+            self.assertIn("ACColorNameTestAccent", color_names)
+            image_names = [e["objcSymbol"] for e in data["images"]]
+            self.assertIn("ACImageNameImg001", image_names)
+            # Swift symbols are camelCased
+            test_accent = next(e for e in data["colors"]
+                               if e["objcSymbol"] == "ACColorNameTestAccent")
+            self.assertEqual(test_accent["swiftSymbol"], "testAccent")
+            self.assertEqual(test_accent["relativePath"],
+                             "./TestAccent.colorset")
+        finally:
+            shutil.rmtree(tmpdir)
+
     def test_symbols_ignored_without_bundle_id(self):
         """Without --bundle-identifier, --generate-objc-asset-symbols is a no-op."""
         tmpdir = tempfile.mkdtemp()

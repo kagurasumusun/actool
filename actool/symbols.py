@@ -1,12 +1,16 @@
-"""Objective-C asset symbol header generation.
+"""Objective-C/Swift asset symbol generation.
 
-Produces a header file that declares string constants for asset catalog
-resource names, so Swift/ObjC code can reference them in a type-safe way.
-Matches the output of Apple's actool --generate-objc-asset-symbols.
+Produces two artifacts used by Xcode's generated-symbols feature:
+- An Objective-C header declaring ACImageName/ACColorName constants.
+- A plist-XML symbol index mapping assets to objc/swift symbol names.
+
+Matches Apple's actool --generate-objc-asset-symbols and
+--generate-asset-symbol-index output closely for common naming patterns.
 """
 
 import json
 import os
+import plistlib
 from pathlib import Path
 
 
@@ -18,6 +22,14 @@ PLATFORM_IDIOMS = {
     "watchsimulator": {"watch", "universal"},
     "appletvos": {"tv", "universal"},
     "appletvsimulator": {"tv", "universal"},
+}
+
+# Type-name suffixes that Apple strips from swift symbols when they appear as
+# the last word of the asset name.
+_SWIFT_STRIP_SUFFIX = {
+    "image": "image",
+    "color": "color",
+    "symbol": "symbol",
 }
 
 
@@ -39,32 +51,33 @@ def _entry_applies(contents_path: Path, platform: str,
     return False
 
 
-def _collect_assets(xcassets_path: str, platform: str,
-                    namespace: str = "") -> tuple[list[str], list[str]]:
-    """Walk the xcassets dir, return (image_names, color_names).
+def _walk_assets(xcassets_path: str, platform: str,
+                 rel_prefix: str = "",
+                 namespace: str = "") -> list[tuple[str, str, str, str]]:
+    """Yield (kind, leaf_name, namespaced_name, relative_path) for each asset.
 
-    Names include namespace prefixes for groups with provides-namespace.
+    kind is "image" or "color". relative_path is POSIX-style without "./"
+    prefix — callers add it.
     """
-    images: list[str] = []
-    colors: list[str] = []
+    results: list[tuple[str, str, str, str]] = []
     root = Path(xcassets_path)
     if not root.is_dir():
-        return images, colors
+        return results
 
     for item in sorted(root.iterdir()):
         if not item.is_dir():
             continue
         contents = item / "Contents.json"
         name = item.stem
-        facet = f"{namespace}{name}"
+        namespaced = f"{namespace}{name}"
+        rel = f"{rel_prefix}{item.name}" if rel_prefix else item.name
         if item.suffix == ".imageset":
             if _entry_applies(contents, platform, ("images",)):
-                images.append(facet)
+                results.append(("image", name, namespaced, rel))
         elif item.suffix == ".colorset":
             if _entry_applies(contents, platform, ("colors",)):
-                colors.append(facet)
+                results.append(("color", name, namespaced, rel))
         elif not item.suffix:
-            # Plain group directory, may provide namespace
             child_ns = namespace
             if contents.exists():
                 try:
@@ -74,33 +87,131 @@ def _collect_assets(xcassets_path: str, platform: str,
                         child_ns = f"{namespace}{name}/"
                 except (OSError, json.JSONDecodeError):
                     pass
-            sub_images, sub_colors = _collect_assets(
-                str(item), platform, child_ns)
-            images.extend(sub_images)
-            colors.extend(sub_colors)
+            child_rel = f"{rel_prefix}{item.name}/"
+            results.extend(_walk_assets(
+                str(item), platform, child_rel, child_ns))
 
-    return images, colors
+    return results
 
 
-def _sanitize_identifier(name: str) -> str:
-    """Convert asset name to a valid C identifier suffix.
+def _split_words(name: str) -> list[str]:
+    """Split an identifier-like name into words.
 
-    Replaces namespace separators and non-identifier characters.
+    Splits on non-alphanumeric separators, digit/letter boundaries, and
+    camelCase transitions (lower→upper, UPPER→UpperLower).
     """
-    out = []
+    words: list[str] = []
+    current = ""
+    prev_kind: str | None = None
+
+    def kind_of(ch: str) -> str:
+        if ch.isalpha():
+            return "upper" if ch.isupper() else "lower"
+        if ch.isdigit():
+            return "digit"
+        return "sep"
+
     for ch in name:
-        if ch.isalnum() or ch == "_":
-            out.append(ch)
-        # Drop slashes, dashes, etc. - Apple concatenates namespace parts
-    return "".join(out)
+        k = kind_of(ch)
+        if k == "sep":
+            if current:
+                words.append(current)
+                current = ""
+            prev_kind = "sep"
+            continue
+        if prev_kind is None or prev_kind == "sep":
+            current = ch
+        elif k == prev_kind:
+            current += ch
+        elif prev_kind == "lower" and k == "upper":
+            words.append(current)
+            current = ch
+        elif prev_kind == "upper" and k == "lower":
+            # UPPERLower: last upper belongs with the lower run
+            if len(current) > 1:
+                words.append(current[:-1])
+                current = current[-1] + ch
+            else:
+                current += ch
+        else:
+            # digit/letter transition
+            words.append(current)
+            current = ch
+        prev_kind = k
+
+    if current:
+        words.append(current)
+    return words
+
+
+def _objc_identifier(name: str) -> str:
+    """Convert an asset name to the identifier suffix used in ObjC symbols.
+
+    Each word's first character is uppercased; the rest of each word is
+    preserved so all-caps words keep their case (e.g. IMAGE_test → IMAGETest).
+    """
+    words = _split_words(name)
+    parts = []
+    for w in words:
+        if not w:
+            continue
+        if w[0].isalpha():
+            parts.append(w[0].upper() + w[1:])
+        else:
+            parts.append(w)
+    return "".join(parts)
+
+
+def _swift_identifier(name: str, kind: str) -> str:
+    """Convert an asset name to the swift symbol (camelCase).
+
+    Strips the trailing word if it matches the asset-type suffix
+    (image/color/symbol). Prepends '_' if the result starts with a digit.
+    """
+    words = _split_words(name)
+    strip = _SWIFT_STRIP_SUFFIX.get(kind)
+    if strip and len(words) > 1 and words[-1].lower() == strip:
+        words = words[:-1]
+
+    parts = []
+    for i, w in enumerate(words):
+        if not w:
+            continue
+        if i == 0:
+            if w.isalpha() and w.isupper():
+                # Leading acronym (URL, IMAGE) becomes fully lowercase
+                parts.append(w.lower())
+            elif w[0].isalpha():
+                parts.append(w[0].lower() + w[1:])
+            else:
+                parts.append(w)
+        else:
+            if w[0].isalpha():
+                parts.append(w[0].upper() + w[1:])
+            else:
+                parts.append(w)
+
+    result = "".join(parts)
+    if result and result[0].isdigit():
+        result = "_" + result
+    return result
+
+
+def _objc_symbol_name(kind: str, leaf_name: str) -> str:
+    return f"AC{'Color' if kind == 'color' else 'Image'}Name" \
+           f"{_objc_identifier(leaf_name)}"
 
 
 def generate_symbols_header(xcassets_path: str, output_path: str,
                             bundle_identifier: str, platform: str) -> None:
-    """Write an Objective-C header with ACImageName/ACColorName constants."""
-    images, colors = _collect_assets(xcassets_path, platform)
-    images.sort()
-    colors.sort()
+    """Write an Objective-C header with ACImageName/ACColorName constants.
+
+    Uses the full namespaced name as both the identifier suffix and the
+    string literal.
+    """
+    assets = _walk_assets(xcassets_path, platform)
+    images = sorted([a for a in assets if a[0] == "image"], key=lambda a: a[2])
+    colors = sorted([a for a in assets if a[0] == "color"], key=lambda a: a[2])
 
     lines = [
         "#import <Foundation/Foundation.h>\n",
@@ -113,7 +224,6 @@ def generate_symbols_header(xcassets_path: str, output_path: str,
         "\n",
     ]
 
-    # ACBundleID is only emitted when at least one color is present.
     if colors:
         lines.append("/// The resource bundle ID.\n")
         lines.append(
@@ -121,20 +231,22 @@ def generate_symbols_header(xcassets_path: str, output_path: str,
             f"@\"{bundle_identifier}\";\n")
         lines.append("\n")
 
-    for name in colors:
-        ident = _sanitize_identifier(name)
-        lines.append(f"/// The \"{name}\" asset catalog color resource.\n")
+    for _, _, namespaced, _ in colors:
+        ident = _objc_identifier(namespaced)
+        lines.append(
+            f"/// The \"{namespaced}\" asset catalog color resource.\n")
         lines.append(
             f"static NSString * const ACColorName{ident} AC_SWIFT_PRIVATE = "
-            f"@\"{name}\";\n")
+            f"@\"{namespaced}\";\n")
         lines.append("\n")
 
-    for name in images:
-        ident = _sanitize_identifier(name)
-        lines.append(f"/// The \"{name}\" asset catalog image resource.\n")
+    for _, _, namespaced, _ in images:
+        ident = _objc_identifier(namespaced)
+        lines.append(
+            f"/// The \"{namespaced}\" asset catalog image resource.\n")
         lines.append(
             f"static NSString * const ACImageName{ident} AC_SWIFT_PRIVATE = "
-            f"@\"{name}\";\n")
+            f"@\"{namespaced}\";\n")
         lines.append("\n")
 
     lines.append("#undef AC_SWIFT_PRIVATE\n")
@@ -142,3 +254,35 @@ def generate_symbols_header(xcassets_path: str, output_path: str,
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     with open(output_path, "w") as f:
         f.write("".join(lines))
+
+
+def generate_symbol_index(xcassets_path: str, output_path: str,
+                          platform: str) -> None:
+    """Write the plist-XML symbol index file.
+
+    Contains colors/images/symbols arrays. Each entry describes an asset's
+    catalog path, relative path, and its objc/swift symbol identifiers.
+    """
+    assets = _walk_assets(xcassets_path, platform)
+    catalog_abs = os.path.abspath(xcassets_path)
+
+    def entry(kind: str, leaf: str, rel: str) -> dict:
+        return {
+            "catalogPath": catalog_abs,
+            "objcSymbol": _objc_symbol_name(kind, leaf),
+            "relativePath": f"./{rel}",
+            "swiftSymbol": _swift_identifier(leaf, kind),
+        }
+
+    colors = sorted([a for a in assets if a[0] == "color"], key=lambda a: a[3])
+    images = sorted([a for a in assets if a[0] == "image"], key=lambda a: a[3])
+
+    data = {
+        "colors": [entry("color", leaf, rel) for _, leaf, _, rel in colors],
+        "images": [entry("image", leaf, rel) for _, leaf, _, rel in images],
+        "symbols": [],
+    }
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    with open(output_path, "wb") as f:
+        plistlib.dump(data, f, fmt=plistlib.FMT_XML)

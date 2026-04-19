@@ -189,6 +189,10 @@ def main():
                         help="Write an Objective-C header exposing asset "
                              "names as string constants. Requires "
                              "--bundle-identifier; skips CAR compilation.")
+    parser.add_argument("--generate-asset-symbol-index", metavar="PATH",
+                        help="Write a plist-XML symbol index mapping assets "
+                             "to objc/swift symbols. Requires "
+                             "--generate-objc-asset-symbols.")
 
     # Listing
     parser.add_argument("--print-contents", action="store_true",
@@ -230,16 +234,25 @@ def main():
         parser.error("--compile is required")
 
     # --generate-objc-asset-symbols together with --bundle-identifier replaces
-    # normal compilation: only the header file is produced.
+    # normal compilation: only the header (and optional index) is produced.
     if args.generate_objc_asset_symbols and args.bundle_identifier:
-        from .symbols import generate_symbols_header
+        from .symbols import generate_symbols_header, generate_symbol_index
         generate_symbols_header(
             xcassets_path=args.document,
             output_path=args.generate_objc_asset_symbols,
             bundle_identifier=args.bundle_identifier,
             platform=args.platform,
         )
-        output_files = [os.path.abspath(args.generate_objc_asset_symbols)]
+        output_files = []
+        if args.generate_asset_symbol_index:
+            generate_symbol_index(
+                xcassets_path=args.document,
+                output_path=args.generate_asset_symbol_index,
+                platform=args.platform,
+            )
+            output_files.append(
+                os.path.abspath(args.generate_asset_symbol_index))
+        output_files.append(os.path.abspath(args.generate_objc_asset_symbols))
         if args.export_dependency_info:
             _write_dependency_info(args.export_dependency_info,
                                    args.document, output_files)
