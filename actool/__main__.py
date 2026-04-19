@@ -168,6 +168,9 @@ def main():
                         metavar="YES/NO", default="NO",
                         help="Enable on-demand resources (accepted for "
                              "compatibility, no effect on macOS)")
+    parser.add_argument("--bundle-identifier", metavar="ID",
+                        help="Bundle identifier (accepted for compatibility, "
+                             "no effect on typical output)")
     parser.add_argument("--development-region", metavar="REGION",
                         help="Development region (always included in output)")
     parser.add_argument("--include-language", metavar="LANG",

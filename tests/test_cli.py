@@ -97,6 +97,30 @@ class TestCompile(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir)
 
+    def test_bundle_identifier_accepted(self):
+        """--bundle-identifier is accepted without changing output."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            outdir = os.path.join(tmpdir, "out")
+            outdir_no = os.path.join(tmpdir, "out_no")
+            common = ["--platform", "macosx",
+                      "--minimum-deployment-target", "11.0",
+                      "--app-icon", "AppIcon"]
+            stdout, _, rc = run_actool(
+                "--compile", outdir, *common,
+                "--bundle-identifier", "com.example.myapp",
+                REF_XCASSETS)
+            self.assertEqual(rc, 0)
+            run_actool("--compile", outdir_no, *common, REF_XCASSETS)
+            # Output CAR content should be identical
+            with open(os.path.join(outdir, "Assets.car"), "rb") as f:
+                car_a = f.read()
+            with open(os.path.join(outdir_no, "Assets.car"), "rb") as f:
+                car_b = f.read()
+            self.assertEqual(car_a, car_b)
+        finally:
+            shutil.rmtree(tmpdir)
+
     def test_standalone_icon_none(self):
         """--standalone-icon-behavior none suppresses ICNS."""
         tmpdir = tempfile.mkdtemp()
