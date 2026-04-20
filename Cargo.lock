@@ -9,6 +9,7 @@ dependencies = [
  "anyhow",
  "byteorder",
  "clap",
+ "flate2",
  "image",
  "indexmap",
  "lzfse",

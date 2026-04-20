@@ -1,4 +1,5 @@
 pub mod bom;
+pub mod car;
 pub mod deepmap2;
 pub mod icns;
 pub mod name_hash;
