@@ -275,5 +275,5 @@ You can use /usr/bin/actool which will call the system version. Don't try to use
 
 You can create tools to help the analysis, comparison, compiling, etc. but the main app should have the cli and arguments compatible with the original.
 
-Use unit tests for specific new functionality, `tests/test_regressions.py` for checking the full flow of things that just got fixed, and run `tools/validate_repos.py` for checking results match against multiple third party repositories.
+Use Rust integration tests under `tests/` (one file per area, e.g. `packing_regressions.rs`, `dmp2_regressions.rs`) for full-flow coverage, and run `tools/validate_repos.py --only <slug>` to check results against third-party repositories.
 Don't use comments that repeat the code logic. Only use comments for details about why the code is there.

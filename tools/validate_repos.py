@@ -27,6 +27,24 @@ TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(TOOLS_DIR)
 THIRD_PARTY = os.path.join(PROJECT_ROOT, "third_party")
 SYSTEM_ACTOOL = "/usr/bin/actool"
+RUST_ACTOOL = os.path.join(PROJECT_ROOT, "target", "release", "actool")
+
+
+def ensure_rust_actool_built() -> str:
+    """Build the Rust actool binary in release mode if missing. Returns path."""
+    if os.path.isfile(RUST_ACTOOL):
+        return RUST_ACTOOL
+    print("  Building Rust actool (release) ...")
+    result = subprocess.run(
+        ["cargo", "build", "--release", "--bin", "actool"],
+        cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=600)
+    if result.returncode != 0:
+        print(f"  cargo build failed:\n{result.stderr}", file=sys.stderr)
+        sys.exit(2)
+    if not os.path.isfile(RUST_ACTOOL):
+        print(f"  binary still missing at {RUST_ACTOOL}", file=sys.stderr)
+        sys.exit(2)
+    return RUST_ACTOOL
 
 # macOS deployment targets that change compression behavior:
 #   < 10.11  → uncompressed
@@ -88,11 +106,10 @@ def compile_system(xcassets: str, outdir: str, deploy: str,
 
 def compile_ours(xcassets: str, outdir: str, deploy: str,
                  app_icon: str | None) -> bool:
-    """Compile with our actool. Returns True on success."""
+    """Compile with the Rust actool binary. Returns True on success."""
     os.makedirs(outdir, exist_ok=True)
     cmd = [
-        sys.executable, "-m", "actool",
-        "--compile", outdir,
+        RUST_ACTOOL, "--compile", outdir,
         "--platform", "macosx",
         "--minimum-deployment-target", deploy,
     ]
@@ -230,6 +247,8 @@ def main():
         print("Error: system actool not found at "
               f"{SYSTEM_ACTOOL}", file=sys.stderr)
         sys.exit(2)
+
+    ensure_rust_actool_built()
 
     if not os.path.isfile(args.repos_file):
         print(f"Error: repos file not found: {args.repos_file}",
