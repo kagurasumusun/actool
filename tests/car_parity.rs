@@ -14,7 +14,7 @@ fn read_section(cursor: &mut std::io::Cursor<&Vec<u8>>) -> Vec<u8> {
 
 #[test]
 fn car_helpers_match_python() {
-    let reference_path = "tmp/car_python_reference.bin";
+    let reference_path = "tests/parity_references/car_python_reference.bin";
     if !std::path::Path::new(reference_path).exists() {
         eprintln!("Skipping: {reference_path} not present");
         return;

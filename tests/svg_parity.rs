@@ -13,7 +13,7 @@ fn matches_python_reference() {
         eprintln!("Skipping: CoreSVG not available");
         return;
     }
-    let reference_path = "tmp/svg_python_reference.bin";
+    let reference_path = "tests/parity_references/svg_python_reference.bin";
     if !std::path::Path::new(reference_path).exists() {
         eprintln!("Skipping: {reference_path} not present");
         return;

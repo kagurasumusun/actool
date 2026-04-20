@@ -18,7 +18,7 @@ fn matches_python_reference() {
     bom.add_raw_key_tree("RTBL", &raw, 1024);
     let ours = bom.to_bytes();
 
-    let reference_path = "tmp/bom_python_reference.bin";
+    let reference_path = "tests/parity_references/bom_python_reference.bin";
     if !std::path::Path::new(reference_path).exists() {
         eprintln!("Skipping: {reference_path} not present");
         return;
