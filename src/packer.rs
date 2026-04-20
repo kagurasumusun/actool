@@ -263,6 +263,75 @@ fn pack_shelf_atlas(
     overflow
 }
 
+/// Group renditions into packable groups and inline-only renditions.
+///
+/// Returns `(pack_groups, inline_renditions)` where each pack group is
+/// `(pixel_format, scale, rendition_indices)` — the caller keeps
+/// ownership of the renditions vector, so we pass indices back.
+pub fn group_for_packing(
+    renditions: &[crate::car::Rendition],
+) -> (Vec<([u8; 4], u16, Vec<usize>)>, Vec<usize>) {
+    use crate::car;
+
+    const ICON_INLINE_THRESHOLD: u32 = 256;
+    const PACK_MAX_WIDTH: u32 = 262;
+    const PACK_MAX_HEIGHT: u32 = 196;
+    const PACK_MARGIN: u32 = 4;
+
+    // group key: (pixel_format, scale, sprite_atlas_id) -> list of indices
+    let mut groups: indexmap::IndexMap<([u8; 4], u16, u16), Vec<usize>> =
+        indexmap::IndexMap::new();
+    let mut force_inline: Vec<usize> = Vec::new();
+
+    for (i, rend) in renditions.iter().enumerate() {
+        match rend.layout {
+            car::LAYOUT_MULTISIZE_IMAGE
+            | car::LAYOUT_COLOR
+            | car::LAYOUT_RAW_DATA
+            | car::LAYOUT_METADATA => {
+                force_inline.push(i);
+                continue;
+            }
+            _ => {}
+        }
+        if rend.part == car::PART_ICON && rend.width >= ICON_INLINE_THRESHOLD {
+            force_inline.push(i);
+            continue;
+        }
+        if rend.csi_override.is_some() {
+            force_inline.push(i);
+            continue;
+        }
+        if rend.width >= PACK_MAX_WIDTH - PACK_MARGIN
+            || rend.height >= PACK_MAX_HEIGHT - PACK_MARGIN
+        {
+            force_inline.push(i);
+            continue;
+        }
+        let key = (rend.pixel_format, rend.scale, rend.sprite_atlas_id);
+        groups.entry(key).or_default().push(i);
+    }
+
+    let mut pack_groups: Vec<([u8; 4], u16, Vec<usize>)> = Vec::new();
+    let mut inline: Vec<usize> = force_inline;
+
+    // Sort keys deterministically to match Python's sorted()
+    let mut keys: Vec<_> = groups.keys().cloned().collect();
+    keys.sort_by_key(|k| (k.0, k.1, k.2));
+    for k in keys {
+        let idxs = groups.shift_remove(&k).unwrap();
+        let distinct: std::collections::HashSet<u16> =
+            idxs.iter().map(|i| renditions[*i].identifier).collect();
+        if distinct.len() >= 2 {
+            pack_groups.push((k.0, k.1, idxs));
+        } else {
+            inline.extend(idxs);
+        }
+    }
+
+    (pack_groups, inline)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
