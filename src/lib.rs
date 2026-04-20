@@ -5,3 +5,4 @@ pub mod icns;
 pub mod name_hash;
 pub mod packer;
 pub mod svg_raster;
+pub mod symbols;
