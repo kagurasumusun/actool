@@ -16,6 +16,7 @@ path = "src/lib.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+png = "0.18"
 lzfse = "0.2"
 plist = "1.6"
 serde = { version = "1", features = ["derive"] }
