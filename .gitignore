@@ -4,6 +4,10 @@ __pycache__
 .venv
 *.pyc
 
+# Rust
+target/
+tmp/
+
 # external files
 actool_server.py
 actool_client.py
