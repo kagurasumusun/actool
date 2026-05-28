@@ -104,6 +104,9 @@ LAYOUT_NAMES = {
     1005: "sprite_meta",
     1009: "color",
     1010: "multisize",
+    1019: "iconstack",
+    1020: "icon_group",
+    1021: "gradient",
 }
 
 TLV_NAMES = {

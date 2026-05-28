@@ -33,6 +33,10 @@ pub const LAYOUT_NAME_LIST: u16 = 1004;
 pub const LAYOUT_METADATA: u16 = 1005;
 pub const LAYOUT_COLOR: u16 = 1009;
 pub const LAYOUT_MULTISIZE_IMAGE: u16 = 1010;
+// IconComposer (macOS 26 / "liquid glass") renditions.
+pub const LAYOUT_ICONSTACK: u16 = 1019;
+pub const LAYOUT_ICON_GROUP: u16 = 1020;
+pub const LAYOUT_GRADIENT: u16 = 1021;
 
 pub const PIXELFMT_DATA: &[u8; 4] = b"ATAD";
 pub const PIXELFMT_PDF: &[u8; 4] = b" FDP";
