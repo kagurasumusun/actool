@@ -24,6 +24,61 @@ fn bundle_facet_prefix(icon_path: &Path) -> String {
         .to_string()
 }
 
+/// Build a deterministic UUID-shaped string derived from `inputs`. Apple's
+/// iconNxN_NSAppearanceName..._UUID-PID-HEX.png names embed a per-rendition
+/// UUID; we don't need it to be cryptographic — just stable per input so
+/// regenerating the same catalog yields the same byte stream.
+fn deterministic_uuid(inputs: &[&str]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h1 = std::collections::hash_map::DefaultHasher::new();
+    let mut h2 = std::collections::hash_map::DefaultHasher::new();
+    "uuid-lo".hash(&mut h1);
+    "uuid-hi".hash(&mut h2);
+    for s in inputs {
+        s.hash(&mut h1);
+        s.hash(&mut h2);
+    }
+    let lo = h1.finish();
+    let hi = h2.finish();
+    let bytes: [u8; 16] = {
+        let mut out = [0u8; 16];
+        out[..8].copy_from_slice(&lo.to_be_bytes());
+        out[8..].copy_from_slice(&hi.to_be_bytes());
+        out
+    };
+    format!(
+        "{:02X}{:02X}{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5],
+        bytes[6], bytes[7],
+        bytes[8], bytes[9],
+        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+    )
+}
+
+/// Name a pre-rendered icon size the way Apple's actool does inside .car:
+/// `iconNxN_<appearance>_<UUID>-<pid>-<hex>.png`. The pid+hex tail is a
+/// stable hash-derived suffix; CoreUI keys renditions by attribute tuple,
+/// not by name, so the precise format doesn't affect lookup.
+fn pre_rendered_name(
+    icon_name: &str,
+    point_size: u32,
+    scale: u32,
+    appearance_name: &str,
+) -> String {
+    let scale_label = format!("{scale}x");
+    let pt_label = format!("{point_size}");
+    let uuid = deterministic_uuid(&[icon_name, &pt_label, &scale_label, appearance_name]);
+    let tail_uuid =
+        deterministic_uuid(&[icon_name, &pt_label, &scale_label, "tail"]);
+    let tail_hex: String = tail_uuid.chars().filter(|c| *c != '-').collect();
+    let pid = &tail_hex[0..5];
+    let hex = &tail_hex[5..21];
+    format!(
+        "icon{point_size}x{point_size}_{appearance_name}_{uuid}-{pid}-{hex}.png"
+    )
+}
+
 const MACOS_ICON_SIZES: &[(u32, u32)] = &[
     (16, 1),
     (16, 2),
@@ -265,12 +320,14 @@ fn build_icon_car(
         let (pd, w, h, pf) = load_image_as_bgra(img_path, false)?;
         let point_size = pixel_size / scale;
         let dim2 = icon_dim2(point_size);
+        let name = pre_rendered_name(
+            icon_name,
+            point_size,
+            *scale,
+            "NSAppearanceNameSystem",
+        );
         renditions.push(Rendition {
-            name: img_path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string(),
+            name,
             identifier: ident,
             element: car::ELEMENT_UNIVERSAL,
             part: car::PART_ICON,
@@ -397,6 +454,40 @@ fn write_icon_car(
     bom.add_raw_key_tree("BITMAPKEYS", &[], 1024);
     bom.write(car_path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pre_rendered_name_matches_apple_pattern() {
+        let n = pre_rendered_name("Icon", 16, 2, "NSAppearanceNameSystem");
+        assert!(n.starts_with("icon16x16_NSAppearanceNameSystem_"));
+        assert!(n.ends_with(".png"));
+        // Pattern: prefix + UUID(8-4-4-4-12) + - + 5 hex + - + 16 hex + .png
+        let body = n
+            .trim_start_matches("icon16x16_NSAppearanceNameSystem_")
+            .trim_end_matches(".png");
+        let parts: Vec<&str> = body.split('-').collect();
+        assert_eq!(parts.len(), 7, "expected UUID-PID-HEX shape, got {n:?}");
+    }
+
+    #[test]
+    fn pre_rendered_name_is_deterministic() {
+        let a = pre_rendered_name("Icon", 32, 2, "NSAppearanceNameSystem");
+        let b = pre_rendered_name("Icon", 32, 2, "NSAppearanceNameSystem");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn pre_rendered_name_differs_by_size_and_scale() {
+        let a = pre_rendered_name("Icon", 32, 1, "NSAppearanceNameSystem");
+        let b = pre_rendered_name("Icon", 32, 2, "NSAppearanceNameSystem");
+        let c = pre_rendered_name("Icon", 64, 2, "NSAppearanceNameSystem");
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+    }
 }
 
 fn write_icon_plist(
