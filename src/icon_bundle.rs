@@ -388,6 +388,9 @@ fn write_icon_car(
         .collect();
     facetkey_entries.sort_by(|a, b| a.0.cmp(&b.0));
     bom.add_tree("FACETKEYS", &facetkey_entries, 4096);
+    let mut appearance_entries = car::make_appearancekeys_entries();
+    appearance_entries.sort_by(|a, b| a.0.cmp(&b.0));
+    bom.add_tree("APPEARANCEKEYS", &appearance_entries, 4096);
     bom.set_inline_key_size(Some(keyformat.len() * 2));
     bom.add_tree("RENDITIONS", all_entries, 4096);
     bom.set_inline_key_size(None);

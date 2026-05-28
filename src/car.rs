@@ -202,6 +202,26 @@ pub fn make_rendition_key(parts: RenditionKeyParts, keyformat: &[u16]) -> Vec<u8
     buf
 }
 
+/// Standard APPEARANCEKEYS entries emitted by Apple's actool for IconComposer
+/// (.icon) bundles. The values are the appearance attribute IDs that appear
+/// in rendition keys when a rendition is specialized for that appearance.
+pub fn make_appearancekeys_entries() -> Vec<(Vec<u8>, Vec<u8>)> {
+    let entries: &[(&str, u16)] = &[
+        ("NSAppearanceNameSystem", 0),
+        ("NSAppearanceNameDarkAqua", 1),
+        ("NSAppearanceNameAqua", 8),
+        ("ISAppearanceTintable", 10),
+    ];
+    entries
+        .iter()
+        .map(|(name, id)| {
+            let mut v = Vec::with_capacity(2);
+            v.write_u16::<LittleEndian>(*id).unwrap();
+            (name.as_bytes().to_vec(), v)
+        })
+        .collect()
+}
+
 pub fn make_facetkey_value(element: u16, part: Option<u16>, identifier: u16) -> Vec<u8> {
     let mut attrs: Vec<(u16, u16)> = Vec::new();
     attrs.push((1, element));
