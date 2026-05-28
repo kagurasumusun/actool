@@ -4,11 +4,25 @@ use crate::bom::BomWriter;
 use crate::car::{self, MultisizeImageEntry, Rendition};
 use crate::catalog::load_image_as_bgra;
 use crate::icns;
+use crate::icon_json::IconJson;
 use crate::name_hash::hash_name;
 use anyhow::Result;
 use image::imageops::FilterType;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// One facet entry in the FACETKEYS tree: (facet_name, element, part, identifier).
+type FacetEntry = (String, u16, Option<u16>, u16);
+
+/// Bundle stem used as the prefix for asset facet names: e.g.
+/// `<stem>_Assets/<layer_name>`. Matches Apple's actool naming.
+fn bundle_facet_prefix(icon_path: &Path) -> String {
+    icon_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Assets")
+        .to_string()
+}
 
 const MACOS_ICON_SIZES: &[(u32, u32)] = &[
     (16, 1),
@@ -58,15 +72,19 @@ pub fn compile_icon_bundle(
         .to_string();
     let icon_name = app_icon.map(|s| s.to_string()).unwrap_or(bundle_stem);
 
-    let icon_json: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(icon_path.join("icon.json"))?)?;
-    let source_images = find_all_source_images(icon_path, &icon_json);
+    let icon_json_path = icon_path.join("icon.json");
+    let icon_json_text = fs::read_to_string(&icon_json_path)?;
+    let icon_json_value: serde_json::Value = serde_json::from_str(&icon_json_text)?;
+    let parsed: IconJson = IconJson::parse(&icon_json_text)?;
+    let source_images = find_all_source_images(icon_path, &icon_json_value);
     if source_images.is_empty() {
         return Ok(Vec::new());
     }
     let has_svg = source_images
         .iter()
         .any(|p| p.to_string_lossy().to_lowercase().ends_with(".svg"));
+    let facet_prefix = bundle_facet_prefix(icon_path);
+    let layer_assets = collect_layer_assets(icon_path, &parsed, &facet_prefix);
 
     let mut output_files: Vec<PathBuf> = Vec::new();
 
@@ -100,7 +118,7 @@ pub fn compile_icon_bundle(
             }
         }
         let car_path = output_dir.join("Assets.car");
-        build_icon_car(&car_path, &icon_name, &icon_images, platform, min_deploy)?;
+        build_icon_car(&car_path, &icon_name, &icon_images, &layer_assets, platform, min_deploy)?;
         output_files.push(fs::canonicalize(&car_path).unwrap_or(car_path));
         let _ = fs::remove_dir_all(&tmpdir);
     }
@@ -110,6 +128,50 @@ pub fn compile_icon_bundle(
         output_files.push(fs::canonicalize(path).unwrap_or(path.to_path_buf()));
     }
     Ok(output_files)
+}
+
+/// Build a `<stem>_Assets/<layer_name>` facet entry for each layer that
+/// references an image. Source paths are resolved against `<bundle>/Assets/`
+/// first, then the bundle root. Layers without a resolvable image are
+/// skipped silently — they don't correspond to a source asset.
+fn collect_layer_assets(
+    bundle: &Path,
+    json: &IconJson,
+    facet_prefix: &str,
+) -> Vec<LayerAsset> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (_group, layer) in json.iter_layers() {
+        let Some(image_name) = layer.image_name.as_deref() else {
+            continue;
+        };
+        let Some(layer_name) = layer.name.as_deref() else {
+            continue;
+        };
+        // Skip SVGs here; the .icon SVG path emits them via build_svg_icon_car.
+        if image_name.to_lowercase().ends_with(".svg") {
+            continue;
+        }
+        let assets_path = bundle.join("Assets").join(image_name);
+        let resolved = if assets_path.exists() {
+            assets_path
+        } else {
+            let root_path = bundle.join(image_name);
+            if !root_path.exists() {
+                continue;
+            }
+            root_path
+        };
+        let facet_name = format!("{facet_prefix}_Assets/{layer_name}");
+        if !seen.insert(facet_name.clone()) {
+            continue;
+        }
+        out.push(LayerAsset {
+            facet_name,
+            source_path: resolved,
+        });
+    }
+    out
 }
 
 fn find_all_source_images(bundle: &Path, json: &serde_json::Value) -> Vec<PathBuf> {
@@ -178,13 +240,20 @@ fn build_svg_icon_car(
     }
     all_entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-    write_icon_car(car_path, icon_name, ident, &keyformat, &all_entries, platform, min_deploy)
+    let facets = vec![(
+        icon_name.to_string(),
+        car::ELEMENT_UNIVERSAL,
+        Some(car::PART_ICON),
+        ident,
+    )];
+    write_icon_car(car_path, &facets, &keyformat, &all_entries, platform, min_deploy)
 }
 
 fn build_icon_car(
     car_path: &Path,
     icon_name: &str,
     icon_images: &[(PathBuf, u32, u32)],
+    layer_assets: &[LayerAsset],
     platform: &str,
     min_deploy: &str,
 ) -> Result<()> {
@@ -236,6 +305,45 @@ fn build_icon_car(
     ms_rend.keyformat = keyformat.clone();
     renditions.push(ms_rend);
 
+    let mut facets: Vec<FacetEntry> = vec![(
+        icon_name.to_string(),
+        car::ELEMENT_UNIVERSAL,
+        Some(car::PART_ICON),
+        ident,
+    )];
+    for asset in layer_assets {
+        let asset_ident = hash_name(&asset.facet_name);
+        let (pd, w, h, pf) = load_image_as_bgra(&asset.source_path, false)?;
+        renditions.push(Rendition {
+            name: asset
+                .source_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+            identifier: asset_ident,
+            element: car::ELEMENT_UNIVERSAL,
+            part: car::PART_REGULAR,
+            scale: 1,
+            width: w,
+            height: h,
+            pixel_data: pd,
+            pixel_format: pf,
+            layout: car::LAYOUT_ONE_PART_SCALE,
+            keyformat: keyformat.clone(),
+            min_deploy: min_deploy.to_string(),
+            platform: platform.to_string(),
+            colorspace_id: car::colorspace_for_pixel_format(&pf),
+            ..Rendition::default()
+        });
+        facets.push((
+            asset.facet_name.clone(),
+            car::ELEMENT_UNIVERSAL,
+            Some(car::PART_REGULAR),
+            asset_ident,
+        ));
+    }
+
     let mut all_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     for rend in &renditions {
         let key = rend.build_rendition_key();
@@ -244,13 +352,19 @@ fn build_icon_car(
     }
     all_entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-    write_icon_car(car_path, icon_name, ident, &keyformat, &all_entries, platform, min_deploy)
+    write_icon_car(car_path, &facets, &keyformat, &all_entries, platform, min_deploy)
+}
+
+/// A layer's source image, emitted as a `<stem>_Assets/<layer_name>` facet
+/// referencing an inline rendition of the image bytes.
+pub struct LayerAsset {
+    pub facet_name: String,
+    pub source_path: PathBuf,
 }
 
 fn write_icon_car(
     car_path: &Path,
-    icon_name: &str,
-    ident: u16,
+    facets: &[FacetEntry],
     keyformat: &[u16],
     all_entries: &[(Vec<u8>, Vec<u8>)],
     platform: &str,
@@ -263,10 +377,16 @@ fn write_icon_car(
         "EXTENDED_METADATA",
         car::make_extended_metadata(platform, min_deploy),
     );
-    let facetkey_entries = vec![(
-        icon_name.as_bytes().to_vec(),
-        car::make_facetkey_value(car::ELEMENT_UNIVERSAL, Some(car::PART_ICON), ident),
-    )];
+    let mut facetkey_entries: Vec<(Vec<u8>, Vec<u8>)> = facets
+        .iter()
+        .map(|(name, element, part, ident)| {
+            (
+                name.as_bytes().to_vec(),
+                car::make_facetkey_value(*element, *part, *ident),
+            )
+        })
+        .collect();
+    facetkey_entries.sort_by(|a, b| a.0.cmp(&b.0));
     bom.add_tree("FACETKEYS", &facetkey_entries, 4096);
     bom.set_inline_key_size(Some(keyformat.len() * 2));
     bom.add_tree("RENDITIONS", all_entries, 4096);
