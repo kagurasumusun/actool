@@ -509,6 +509,94 @@ fn build_icon_car(
         ));
     }
 
+    // Apple emits iconstack + IconGroup per non-system appearance for .icon
+    // bundles. Only meaningful when we have a group + at least one image
+    // layer + gradients to back the appearance variants.
+    let layered = !group_facet_names.is_empty()
+        && !layer_assets.is_empty()
+        && !gradient_assets.is_empty();
+    if layered {
+        let group_facet = &group_facet_names[0];
+        let group_ident = hash_name(group_facet);
+        let main_ident = hash_name(icon_name);
+        let stack_name = format!("{icon_name}.iconstack");
+        let layer_asset = &layer_assets[0];
+        let layer_ident = hash_name(&layer_asset.facet_name);
+        // Map appearance ID -> gradient facet name. 1=DarkAqua uses the
+        // second (dark) gradient; 8=Aqua and 10=Tintable use the first.
+        let grad1_ident = hash_name(&gradient_assets[0].facet_name);
+        let grad2_ident = hash_name(
+            &gradient_assets
+                .get(1)
+                .map(|g| g.facet_name.clone())
+                .unwrap_or_else(|| gradient_assets[0].facet_name.clone()),
+        );
+        for appearance in [1u16, 8, 10] {
+            let grad_id = if appearance == 1 { grad2_ident } else { grad1_ident };
+            let stack_csi = car::build_iconstack_csi(
+                &stack_name,
+                1024,
+                &[
+                    car::LayerRef {
+                        part: car::PART_ICON_GRADIENT,
+                        identifier: grad_id,
+                    },
+                    car::LayerRef {
+                        part: car::PART_ICON_GROUP,
+                        identifier: group_ident,
+                    },
+                ],
+            );
+            renditions.push(Rendition {
+                name: stack_name.clone(),
+                identifier: main_ident,
+                element: car::ELEMENT_UNIVERSAL,
+                part: car::PART_ICON_COMPOSER,
+                scale: 1,
+                appearance,
+                width: 1024,
+                height: 1024,
+                pixel_data: Vec::new(),
+                pixel_format: *car::PIXELFMT_DATA,
+                layout: car::LAYOUT_ICONSTACK,
+                keyformat: placeholder_kf.clone(),
+                min_deploy: min_deploy.to_string(),
+                platform: platform.to_string(),
+                colorspace_id: 0,
+                csi_override: Some(stack_csi),
+                ..Rendition::default()
+            });
+
+            let group_csi = car::build_icongroup_csi(
+                "IconGroup",
+                1024,
+                &[car::LayerRef {
+                    part: car::PART_REGULAR,
+                    identifier: layer_ident,
+                }],
+            );
+            renditions.push(Rendition {
+                name: "IconGroup".to_string(),
+                identifier: group_ident,
+                element: car::ELEMENT_UNIVERSAL,
+                part: car::PART_ICON_GROUP,
+                scale: 1,
+                appearance,
+                width: 0,
+                height: 0,
+                pixel_data: Vec::new(),
+                pixel_format: *car::PIXELFMT_DATA,
+                layout: car::LAYOUT_ICON_GROUP,
+                keyformat: placeholder_kf.clone(),
+                min_deploy: min_deploy.to_string(),
+                platform: platform.to_string(),
+                colorspace_id: 0,
+                csi_override: Some(group_csi),
+                ..Rendition::default()
+            });
+        }
+    }
+
     let keyformat = car::compute_keyformat(&renditions, false);
     for rend in &mut renditions {
         rend.keyformat = keyformat.clone();

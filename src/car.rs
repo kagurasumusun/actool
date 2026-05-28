@@ -729,6 +729,173 @@ pub fn build_packed_asset_csi(
     )
 }
 
+/// Reference to a rendition embedded in iconstack / IconGroup TLVs.
+/// Apple encodes each as a 12-byte (attr, value) tuple covering element,
+/// part and identifier — the other rendition-key attributes default to 0.
+pub struct LayerRef {
+    pub part: u16,
+    pub identifier: u16,
+}
+
+fn write_layer_key_fragment(buf: &mut Vec<u8>, r: &LayerRef) {
+    buf.write_u16::<LittleEndian>(1).unwrap();
+    buf.write_u16::<LittleEndian>(ELEMENT_UNIVERSAL).unwrap();
+    buf.write_u16::<LittleEndian>(2).unwrap();
+    buf.write_u16::<LittleEndian>(r.part).unwrap();
+    buf.write_u16::<LittleEndian>(17).unwrap();
+    buf.write_u16::<LittleEndian>(r.identifier).unwrap();
+}
+
+/// iconstack rendition (LAYOUT_ICONSTACK=1019). Apple emits one per
+/// non-system appearance (DarkAqua/Aqua/Tintable), each referencing the
+/// stacked layers (gradient + group facets) that compose the icon for
+/// that appearance.
+pub fn build_iconstack_csi(name: &str, dim: u32, layers: &[LayerRef]) -> Vec<u8> {
+    let mut t3f4 = Vec::new();
+    t3f4.write_u32::<LittleEndian>(layers.len() as u32).unwrap();
+    for layer in layers {
+        t3f4.extend(std::iter::repeat(0u8).take(28));
+        t3f4.write_f32::<LittleEndian>(1.0).unwrap();
+        t3f4.write_u32::<LittleEndian>(16).unwrap();
+        write_layer_key_fragment(&mut t3f4, layer);
+    }
+    t3f4.extend(std::iter::repeat(0u8).take(4));
+
+    let mut t3fc = Vec::new();
+    t3fc.write_u32::<LittleEndian>(layers.len() as u32).unwrap();
+    t3fc.write_u32::<LittleEndian>(0).unwrap();
+    for (i, _) in layers.iter().enumerate() {
+        t3fc.write_u32::<LittleEndian>(if i == 0 { 0 } else { 2 }).unwrap();
+        t3fc.write_u32::<LittleEndian>(0).unwrap();
+        t3fc.write_u32::<LittleEndian>(1).unwrap();
+        t3fc.write_u8(0).unwrap();
+    }
+
+    // 0x3FD: 4 (count) + N × 20-byte entries + 4-byte trailer.
+    // Each entry is 16 zeros + f32 — Apple writes 0.5 for group-typed
+    // layers (part == PART_ICON_GROUP), 0.0 otherwise.
+    let mut t3fd = Vec::new();
+    t3fd.write_u32::<LittleEndian>(layers.len() as u32).unwrap();
+    for layer in layers {
+        t3fd.extend(std::iter::repeat(0u8).take(16));
+        let v = if layer.part == PART_ICON_GROUP { 0.5 } else { 0.0 };
+        t3fd.write_f32::<LittleEndian>(v).unwrap();
+    }
+    t3fd.extend(std::iter::repeat(0u8).take(4));
+
+    let mut tlv = Vec::new();
+    tlv.extend(tlv_header(0x03F4, t3f4.len() as u32));
+    tlv.extend(t3f4);
+    tlv.extend(tlv_header(0x03FC, t3fc.len() as u32));
+    tlv.extend(t3fc);
+    tlv.extend(tlv_header(0x03FD, t3fd.len() as u32));
+    tlv.extend(t3fd);
+    tlv.extend(make_blend_opacity_tlv());
+    tlv.extend(make_layered_uti_tlv());
+    tlv.extend(make_exif_orientation_tlv(1));
+
+    let trailer = make_dwar_trailer();
+    build_csi(
+        dim,
+        dim,
+        100,
+        PIXELFMT_DATA,
+        LAYOUT_ICONSTACK,
+        name,
+        &tlv,
+        &trailer,
+        0,
+        0,
+        1,
+    )
+}
+
+/// IconGroup rendition (LAYOUT_ICON_GROUP=1020). Apple emits one per
+/// non-system appearance; each references the group's child layers
+/// (typically a single image layer like `<stem>_Assets/element`).
+/// `child_dim` is the natural pixel dimension of the underlying image
+/// (Apple writes it twice into each entry — probably as render hints).
+pub fn build_icongroup_csi(name: &str, child_dim: u32, layers: &[LayerRef]) -> Vec<u8> {
+    let mut t3f4 = Vec::new();
+    t3f4.write_u32::<LittleEndian>(layers.len() as u32).unwrap();
+    for layer in layers {
+        t3f4.extend(std::iter::repeat(0u8).take(16));
+        t3f4.write_u32::<LittleEndian>(child_dim).unwrap();
+        t3f4.write_u32::<LittleEndian>(child_dim).unwrap();
+        t3f4.write_u32::<LittleEndian>(0).unwrap();
+        t3f4.write_f32::<LittleEndian>(1.0).unwrap();
+        t3f4.write_u32::<LittleEndian>(16).unwrap();
+        write_layer_key_fragment(&mut t3f4, layer);
+    }
+    t3f4.extend(std::iter::repeat(0u8).take(4));
+
+    let mut t3fc = Vec::new();
+    t3fc.write_u32::<LittleEndian>(layers.len() as u32).unwrap();
+    t3fc.write_u32::<LittleEndian>(0).unwrap();
+    for _ in layers {
+        t3fc.write_u32::<LittleEndian>(0).unwrap();
+        t3fc.write_u32::<LittleEndian>(0).unwrap();
+        t3fc.write_u32::<LittleEndian>(1).unwrap();
+        t3fc.write_u8(0).unwrap();
+    }
+
+    // Same 20-byte-entry shape as iconstack 0x3FD, with image layers (the
+    // child of a group) always carrying f32 = 0.0.
+    let mut t3fd = Vec::new();
+    t3fd.write_u32::<LittleEndian>(layers.len() as u32).unwrap();
+    for _ in layers {
+        t3fd.extend(std::iter::repeat(0u8).take(20));
+    }
+    t3fd.extend(std::iter::repeat(0u8).take(4));
+
+    let mut tlv = Vec::new();
+    tlv.extend(tlv_header(0x03F4, t3f4.len() as u32));
+    tlv.extend(t3f4);
+    tlv.extend(tlv_header(0x03FC, t3fc.len() as u32));
+    tlv.extend(t3fc);
+    tlv.extend(tlv_header(0x03FD, t3fd.len() as u32));
+    tlv.extend(t3fd);
+    tlv.extend(make_blend_opacity_tlv());
+    tlv.extend(make_exif_orientation_tlv(1));
+
+    let trailer = make_dwar_trailer();
+    build_csi(
+        0,
+        0,
+        100,
+        PIXELFMT_DATA,
+        LAYOUT_ICON_GROUP,
+        name,
+        &tlv,
+        &trailer,
+        0,
+        0,
+        1,
+    )
+}
+
+/// Length-prefixed UTI string ("public.layeredimage") wrapped as a 0x03ED
+/// TLV. Apple emits this in iconstack but not IconGroup.
+fn make_layered_uti_tlv() -> Vec<u8> {
+    const UTI: &[u8] = b"public.layeredimage";
+    let mut body = Vec::new();
+    body.write_u32::<LittleEndian>(UTI.len() as u32 + 1).unwrap();
+    body.write_u32::<LittleEndian>(0).unwrap();
+    body.extend_from_slice(UTI);
+    body.write_u8(0).unwrap();
+    let mut out = tlv_header(0x03ED, body.len() as u32);
+    out.extend(body);
+    out
+}
+
+/// 12-byte rendition_data trailer used after layered TLVs: "DWAR" + 8 zeros.
+fn make_dwar_trailer() -> Vec<u8> {
+    let mut t = Vec::new();
+    t.extend_from_slice(b"DWAR");
+    t.extend(std::iter::repeat(0u8).take(8));
+    t
+}
+
 /// Color rendition (LAYOUT_COLOR=1009) used by IconComposer asset fills.
 /// `components` is whatever the colorspace expects: 2 floats for gray+alpha,
 /// 5 for srgba, etc. Matches Apple's RLOC blob layout.
