@@ -403,13 +403,13 @@ fn build_icon_car(
     for asset in layer_assets {
         let asset_ident = hash_name(&asset.facet_name);
         let (pd, w, h, pf) = load_image_as_bgra(&asset.source_path, false)?;
+        // Apple's actool normalizes the in-CAR rendition name for a layer's
+        // source image to "image.png" rather than the original filename.
+        // CoreUI keys renditions by attribute tuple, not by name, so this is
+        // metadata-only — but it matches Apple's catalog byte-for-byte for
+        // the single-layer case.
         renditions.push(Rendition {
-            name: asset
-                .source_path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string(),
+            name: "image.png".to_string(),
             identifier: asset_ident,
             element: car::ELEMENT_UNIVERSAL,
             part: car::PART_REGULAR,
