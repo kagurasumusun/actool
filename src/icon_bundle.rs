@@ -148,16 +148,30 @@ pub fn compile_icon_bundle(
     let facet_prefix = bundle_facet_prefix(icon_path);
     let layer_assets = collect_layer_assets(icon_path, &parsed, &facet_prefix);
     // Apple emits a `<stem>/<group_name>` facet for every group even when
-    // the group has no `name` field — anonymous groups fall back to the
-    // literal "Group" suffix. KYALauncher and tagspaces both rely on this.
-    let group_facet_names: Vec<String> = parsed
-        .groups
-        .iter()
-        .map(|g| {
-            let n = g.name.as_deref().unwrap_or("Group");
-            format!("{facet_prefix}/{n}")
-        })
-        .collect();
+    // the group has no `name` field. Anonymous groups fall back to
+    // "Group", then "Group 2", "Group 3", … so each facet stays unique
+    // across multi-group bundles like ding_icon.
+    let group_facet_names: Vec<String> = {
+        let mut anon_seq: u32 = 0;
+        parsed
+            .groups
+            .iter()
+            .map(|g| {
+                let n = match g.name.as_deref() {
+                    Some(n) => n.to_string(),
+                    None => {
+                        anon_seq += 1;
+                        if anon_seq == 1 {
+                            "Group".to_string()
+                        } else {
+                            format!("Group {anon_seq}")
+                        }
+                    }
+                };
+                format!("{facet_prefix}/{n}")
+            })
+            .collect()
+    };
     let (color_assets, gradient_assets) =
         fill_assets(&facet_prefix, parsed.fill.as_ref(), &parsed)
             .unwrap_or_else(|| (Vec::new(), Vec::new()));
@@ -659,7 +673,12 @@ fn build_icon_car(
             .iter()
             .map(|(p, name)| (*p, name.as_str()))
             .collect();
-        let csi = car::build_icon_gradient_csi(&grad.facet_name, grad.geometry, &stops);
+        let csi = car::build_icon_gradient_csi(
+            &grad.facet_name,
+            grad.geometry,
+            &stops,
+            grad.kind,
+        );
         // Gradient KEYs follow the same scale=1 convention as Colors.
         renditions.push(Rendition {
             name: grad.facet_name.clone(),
@@ -805,12 +824,15 @@ struct ColorAsset {
     components: Vec<f64>,
 }
 
-/// A linear gradient asset extracted from icon.json `fill` specs. Stops
-/// reference Color assets by facet name (e.g. "icon_Assets/Color-2").
+/// A gradient asset extracted from icon.json `fill` specs. Stops reference
+/// Color assets by facet name (e.g. "icon_Assets/Color-2").
 struct GradientAsset {
     facet_name: String,
     geometry: [f32; 4],
     stops: Vec<(f32, String)>,
+    /// 0 = single-color (radial-style; Apple emits this for the user
+    /// color in `automatic-gradient`), 1 = linear top-to-bottom.
+    kind: u32,
 }
 
 /// Apple's default palette for `fill: "automatic"`. Empirically observed in
@@ -855,11 +877,13 @@ fn automatic_fill_assets(facet_prefix: &str) -> (Vec<ColorAsset>, Vec<GradientAs
             facet_name: n("Gradient-1"),
             geometry: [0.5, 0.0, 0.5, 1.0],
             stops: vec![(0.0, n("Color-2")), (1.0, n("Color-3"))],
+            kind: 1,
         },
         GradientAsset {
             facet_name: n("Gradient-2"),
             geometry: [0.5, 0.0, 0.5, 1.0],
             stops: vec![(0.0, n("Color-4")), (1.0, n("Color-5"))],
+            kind: 1,
         },
     ];
     (colors, gradients)
@@ -947,7 +971,59 @@ fn solid_fill_assets(
         facet_name: n("Gradient-1"),
         geometry: [0.5, 0.0, 0.5, 1.0],
         stops: vec![(0.0, n("Color-3")), (1.0, n("Color-4"))],
+        kind: 1,
     }];
+    Some((colors, gradients))
+}
+
+/// Apple's palette for `fill: {"automatic-gradient": "<color spec>"}` —
+/// observed in ding_icon. Same 4 base Colors as the solid case, but
+/// emits TWO gradients: Gradient-1 is a single-stop "user-color"
+/// gradient (kind=0) pointing at Color-2, and Gradient-2 is the
+/// standard dark-mode background (Color-3 → Color-4).
+fn automatic_gradient_fill_assets(
+    facet_prefix: &str,
+    spec: &str,
+) -> Option<(Vec<ColorAsset>, Vec<GradientAsset>)> {
+    let (user_cspace, user_components) = parse_color_spec(spec)?;
+    let n = |s: &str| format!("{facet_prefix}_Assets/{s}");
+    let g = |v: f32| (v as f32) as f64;
+    let colors = vec![
+        ColorAsset {
+            facet_name: n("Color-1"),
+            colorspace_id: 6,
+            components: vec![g(1.0), g(1.0)],
+        },
+        ColorAsset {
+            facet_name: n("Color-2"),
+            colorspace_id: user_cspace,
+            components: user_components,
+        },
+        ColorAsset {
+            facet_name: n("Color-3"),
+            colorspace_id: 2,
+            components: vec![g(0.192), g(1.0)],
+        },
+        ColorAsset {
+            facet_name: n("Color-4"),
+            colorspace_id: 2,
+            components: vec![g(0.078), g(1.0)],
+        },
+    ];
+    let gradients = vec![
+        GradientAsset {
+            facet_name: n("Gradient-1"),
+            geometry: [0.5, 0.0, 0.5, 1.0],
+            stops: vec![(0.0, n("Color-2"))],
+            kind: 0,
+        },
+        GradientAsset {
+            facet_name: n("Gradient-2"),
+            geometry: [0.5, 0.0, 0.5, 1.0],
+            stops: vec![(0.0, n("Color-3")), (1.0, n("Color-4"))],
+            kind: 1,
+        },
+    ];
     Some((colors, gradients))
 }
 
@@ -979,11 +1055,13 @@ fn system_dark_fill_assets(facet_prefix: &str) -> (Vec<ColorAsset>, Vec<Gradient
             facet_name: n("Gradient-1"),
             geometry: [0.5, 0.0, 0.5, 1.0],
             stops: vec![(0.0, n("Color-2")), (1.0, n("Color-3"))],
+            kind: 1,
         },
         GradientAsset {
             facet_name: n("Gradient-2"),
             geometry: [0.5, 0.0, 0.5, 1.0],
             stops: vec![(0.0, n("Color-2")), (1.0, n("Color-3"))],
+            kind: 1,
         },
     ];
     (colors, gradients)
@@ -1043,6 +1121,12 @@ fn fill_assets(
         Fill::Structured(v) => {
             if let Some(spec) = v.get("solid").and_then(|s| s.as_str()) {
                 let (mut colors, gradients) = solid_fill_assets(facet_prefix, spec)?;
+                append_layer_fill_colors(facet_prefix, parsed, &mut colors);
+                return Some((colors, gradients));
+            }
+            if let Some(spec) = v.get("automatic-gradient").and_then(|s| s.as_str()) {
+                let (mut colors, gradients) =
+                    automatic_gradient_fill_assets(facet_prefix, spec)?;
                 append_layer_fill_colors(facet_prefix, parsed, &mut colors);
                 return Some((colors, gradients));
             }

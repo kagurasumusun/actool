@@ -944,11 +944,14 @@ pub fn build_icon_gradient_csi(
     name: &str,
     geom: [f32; 4],
     stops: &[(f32, &str)],
+    kind: u32,
 ) -> Vec<u8> {
+    // `kind`: 0 = "automatic-gradient" style (Apple's term — single user
+    // color, geom unused), 1 = linear two-stop background gradient.
     let mut grad = Vec::new();
     grad.extend_from_slice(b"ARGG");
     grad.write_u32::<LittleEndian>(stops.len() as u32).unwrap();
-    grad.write_u32::<LittleEndian>(1).unwrap();
+    grad.write_u32::<LittleEndian>(kind).unwrap();
     grad.write_u32::<LittleEndian>(0).unwrap();
     for f in geom.iter() {
         grad.write_f32::<LittleEndian>(*f).unwrap();
