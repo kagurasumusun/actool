@@ -3,7 +3,8 @@
 use crate::bom::BomWriter;
 use crate::car::{self, MultisizeImageEntry, Rendition};
 use crate::catalog::load_image_as_bgra;
-use crate::icon_json::{Fill, IconJson};
+use crate::icns;
+use crate::icon_json::{Fill, IconJson, PlatformList};
 use crate::name_hash::hash_name;
 use byteorder::LittleEndian;
 use anyhow::Result;
@@ -195,12 +196,22 @@ pub fn compile_icon_bundle(
             min_deploy,
         )?;
         output_files.push(fs::canonicalize(&car_path).unwrap_or(car_path));
+
+        // Apple emits an `.icns` alongside the catalog when the .icon
+        // bundle is "shared" across legacy targets. Bundles that opt into
+        // a modern explicit platform list (e.g. `squares: ["macOS"]`)
+        // skip the icns. See tests on element-web (no icns), KYA / tagspaces
+        // (icns emitted) for the empirical rule.
+        if needs_standalone_icns(&parsed) && standalone_icon_behavior != "none" {
+            let icns_path = output_dir.join(format!("{icon_name}.icns"));
+            crate::icns::create_icns(&icon_images, &icns_path)?;
+            if icns_path.exists() {
+                output_files.push(fs::canonicalize(&icns_path).unwrap_or(icns_path));
+            }
+        }
+
         let _ = fs::remove_dir_all(&tmpdir);
     }
-    // For .icon bundles Apple's actool never emits a standalone .icns
-    // regardless of --standalone-icon-behavior (default/all) — the catalog
-    // already encodes every appearance + size.
-    let _ = standalone_icon_behavior;
     let _ = accent_color;
 
     // Apple writes an EMPTY plist (`<dict/>`) for .icon bundles; the
@@ -815,6 +826,22 @@ fn fill_is_automatic(fill: Option<&Fill>) -> bool {
         None => true,
         Some(Fill::Keyword(k)) => k == "automatic",
         Some(Fill::Structured(_)) => false,
+    }
+}
+
+/// Whether Apple's actool emits a standalone `.icns` alongside the catalog.
+/// Empirically observed across 3 fixtures:
+///   element-web  `squares: ["macOS"]`  → NO icns
+///   KYA          `squares: "shared"`   → emits AppIcon.icns
+///   tagspaces    `squares: "shared"`   → emits icon.icns
+/// The rule appears to be: skip icns when an explicit modern platform list
+/// is given; emit when the bundle is "shared" with legacy targets or no
+/// platform constraint is declared.
+fn needs_standalone_icns(parsed: &IconJson) -> bool {
+    match parsed.supported_platforms.as_ref().and_then(|sp| sp.squares.as_ref()) {
+        Some(PlatformList::Explicit(_)) => false,
+        Some(PlatformList::Shared(_)) => true,
+        None => true,
     }
 }
 
