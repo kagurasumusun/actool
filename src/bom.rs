@@ -153,21 +153,37 @@ impl BomWriter {
         node.write_u16::<BigEndian>(entries.len() as u16).unwrap();
         node.write_u32::<BigEndian>(forward).unwrap();
         node.write_u32::<BigEndian>(backward).unwrap();
+        let mut key_blob: Vec<u8> = Vec::new();
         for (key_data, value_data) in entries {
             let val_idx = self.add_block(value_data.clone());
             let key_idx = self.add_block(key_data.clone());
             node.write_u32::<BigEndian>(val_idx as u32).unwrap();
             node.write_u32::<BigEndian>(key_idx as u32).unwrap();
+            if self.inline_key_size.is_some() {
+                key_blob.extend_from_slice(key_data);
+            }
+        }
+        // For fixed-key trees (RENDITIONS, APPEARANCEKEYS), Apple inlines
+        // each rendition key immediately after the entries — CUICatalog
+        // reads keys from this packed region rather than chasing key block
+        // pointers, so the order and adjacency to entries matters. Without
+        // this, `imagesWithName:` silently returns empty arrays even when
+        // every separate key block is correct. A 4-byte zero gap separates
+        // the entry table from the inline-key region.
+        if !key_blob.is_empty() {
+            node.extend_from_slice(&[0u8; 4]);
+            node.extend_from_slice(&key_blob);
         }
         if (node.len() as u32) < block_size {
             node.resize(block_size as usize, 0);
         }
-        // Apple reserves trailing zeros of size n_entries * fixed_key_size for
-        // trees whose keys are all the same size (e.g. RENDITIONS, where the
-        // key is a rendition-key tuple sized by KEYFORMAT). Variable-key trees
-        // (FACETKEYS, APPEARANCEKEYS) leave the leaf at exactly block_size.
+        // After the inline-key region the leaf is padded with zeros until
+        // total length = block_size + n_entries * fixed_key_size.
         if let Some(ks) = self.inline_key_size {
-            node.resize(node.len() + entries.len() * ks, 0);
+            let target = block_size as usize + entries.len() * ks;
+            if node.len() < target {
+                node.resize(target, 0);
+            }
         }
         node
     }

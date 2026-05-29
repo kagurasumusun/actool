@@ -127,16 +127,26 @@ pub trait KeyformatRendition {
 }
 
 pub fn make_carheader(rendition_count: u32) -> Vec<u8> {
+    make_carheader_versioned(rendition_count, 972)
+}
+
+/// CARHEADER builder with explicit CoreUI version number. IconComposer
+/// (.icon) catalogs must declare 975 or higher so CoreUI activates the
+/// facet-resolution path that understands PART_ICON_COMPOSER/_GROUP and
+/// the layered-image renditions; lower values cause silent lookup
+/// failures (`imagesWithName:` returns empty arrays).
+pub fn make_carheader_versioned(rendition_count: u32, coreui_version: u32) -> Vec<u8> {
     let mut buf = vec![0u8; 436];
     buf[0..4].copy_from_slice(b"RATC");
-    (&mut buf[4..8]).write_u32::<LittleEndian>(972).unwrap();
+    (&mut buf[4..8]).write_u32::<LittleEndian>(coreui_version).unwrap();
     (&mut buf[8..12]).write_u32::<LittleEndian>(17).unwrap();
     (&mut buf[12..16]).write_u32::<LittleEndian>(0).unwrap();
     (&mut buf[16..20])
         .write_u32::<LittleEndian>(rendition_count)
         .unwrap();
-    let main_ver = b"@(#)PROGRAM:CoreUI  PROJECT:CoreUI-972.1\n";
-    buf[20..20 + main_ver.len()].copy_from_slice(main_ver);
+    let main_ver = format!("@(#)PROGRAM:CoreUI  PROJECT:CoreUI-{coreui_version}.1\n");
+    let main_ver_bytes = main_ver.as_bytes();
+    buf[20..20 + main_ver_bytes.len()].copy_from_slice(main_ver_bytes);
     let ver_str = b"IBCocoaTouchImageCatalogTool-17.0\n";
     buf[148..148 + ver_str.len()].copy_from_slice(ver_str);
     // uuid at 404 = zeros; checksum at 420 = zero.

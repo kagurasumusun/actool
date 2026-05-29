@@ -5,6 +5,7 @@ use crate::car::{self, MultisizeImageEntry, Rendition};
 use crate::catalog::load_image_as_bgra;
 use crate::icon_json::{Fill, IconJson};
 use crate::name_hash::hash_name;
+use byteorder::LittleEndian;
 use anyhow::Result;
 use image::imageops::FilterType;
 use std::fs;
@@ -395,6 +396,11 @@ fn build_icon_car(
                 min_deploy: min_deploy.to_string(),
                 platform: platform.to_string(),
                 colorspace_id: car::colorspace_for_pixel_format(&pf),
+                // Apple uses bitmapEncoding=0 (original) for the pre-rendered
+                // sized PNGs in .icon catalogs; the default (-1 → auto/4)
+                // sets the rendition_flags bit that makes CUICatalog look
+                // for a template variant that doesn't exist.
+                template_rendering_intent: 0,
                 ..Rendition::default()
             });
         }
@@ -554,12 +560,15 @@ fn build_icon_car(
             color.colorspace_id,
             &color.components,
         );
+        // Apple's Color rendition KEY has scale=1 (even though the CSI's own
+        // scale_factor field is 0). CUICatalog filters lookups by scale=1
+        // by default, so scale=0 keys are invisible to colorWithName:.
         renditions.push(Rendition {
             name: color.facet_name.clone(),
             identifier: cident,
             element: car::ELEMENT_UNIVERSAL,
             part: car::PART_COLOR,
-            scale: 0,
+            scale: 1,
             width: 0,
             height: 0,
             pixel_data: Vec::new(),
@@ -588,12 +597,13 @@ fn build_icon_car(
             .map(|(p, name)| (*p, name.as_str()))
             .collect();
         let csi = car::build_icon_gradient_csi(&grad.facet_name, grad.geometry, &stops);
+        // Gradient KEYs follow the same scale=1 convention as Colors.
         renditions.push(Rendition {
             name: grad.facet_name.clone(),
             identifier: gident,
             element: car::ELEMENT_UNIVERSAL,
             part: car::PART_ICON_GRADIENT,
-            scale: 0,
+            scale: 1,
             width: 0,
             height: 0,
             pixel_data: Vec::new(),
@@ -813,12 +823,20 @@ fn write_icon_car(
     min_deploy: &str,
 ) -> Result<()> {
     let mut bom = BomWriter::new();
-    bom.add_named_block("CARHEADER", car::make_carheader(all_entries.len() as u32));
-    bom.add_named_block("KEYFORMAT", car::make_keyformat(keyformat));
+    // Declare CoreUI 975 so the IconComposer code paths in CoreUI activate
+    // — older values cause silent `imagesWithName:` empty results even when
+    // FACETKEYS / RENDITIONS are byte-identical to Apple's output.
     bom.add_named_block(
-        "EXTENDED_METADATA",
-        car::make_extended_metadata(platform, min_deploy),
+        "CARHEADER",
+        car::make_carheader_versioned(all_entries.len() as u32, 975),
     );
+    // The named-block ORDER below matches Apple's actool exactly. CUICatalog
+    // appears to scan named blocks during initWithURL: in BOM order and
+    // expects RENDITIONS to register early, before the auxiliary trees.
+    bom.set_inline_key_size(Some(keyformat.len() * 2));
+    bom.add_tree("RENDITIONS", all_entries, 4096);
+    bom.set_inline_key_size(None);
+
     let mut facetkey_entries: Vec<(Vec<u8>, Vec<u8>)> = facets
         .iter()
         .map(|(name, element, part, ident)| {
@@ -830,15 +848,86 @@ fn write_icon_car(
         .collect();
     facetkey_entries.sort_by(|a, b| a.0.cmp(&b.0));
     bom.add_tree("FACETKEYS", &facetkey_entries, 4096);
+
     let mut appearance_entries = car::make_appearancekeys_entries();
     appearance_entries.sort_by(|a, b| a.0.cmp(&b.0));
     bom.add_tree("APPEARANCEKEYS", &appearance_entries, 4096);
-    bom.set_inline_key_size(Some(keyformat.len() * 2));
-    bom.add_tree("RENDITIONS", all_entries, 4096);
-    bom.set_inline_key_size(None);
-    bom.add_raw_key_tree("BITMAPKEYS", &[], 1024);
+
+    bom.add_named_block("KEYFORMAT", car::make_keyformat(keyformat));
+    bom.add_named_block(
+        "EXTENDED_METADATA",
+        car::make_extended_metadata(platform, min_deploy),
+    );
+
+    let bitmap_entries = build_bitmapkeys(all_entries, keyformat);
+    bom.add_raw_key_tree("BITMAPKEYS", &bitmap_entries, 1024);
     bom.write(car_path)?;
     Ok(())
+}
+
+/// Build BITMAPKEYS entries. CUICatalog uses these to resolve `imagesWithName:`
+/// — without them, every facet lookup returns an empty array. Each entry
+/// maps a facet identifier (raw u32 key) to a 52-byte attribute-mask blob:
+///   u32 version=1, u32 zero, u32 size=40, u32 attr_count=keyformat.len(),
+///   then keyformat.len() × i32 masks. Attributes that vary across renditions
+///   (appearance, element, part, identifier) are always -1; the rest get a
+///   bitmask of the values seen across renditions sharing that identifier.
+fn build_bitmapkeys(
+    entries: &[(Vec<u8>, Vec<u8>)],
+    keyformat: &[u16],
+) -> Vec<(u32, Vec<u8>)> {
+    use byteorder::WriteBytesExt;
+    use std::collections::BTreeMap;
+    let identifier_pos = keyformat.iter().position(|&a| a == 17);
+    let mut per_ident: BTreeMap<u16, Vec<Vec<u16>>> = BTreeMap::new();
+    for (key, _) in entries {
+        if key.len() < keyformat.len() * 2 {
+            continue;
+        }
+        let mut attrs = Vec::with_capacity(keyformat.len());
+        for i in 0..keyformat.len() {
+            let v = u16::from_le_bytes([key[i * 2], key[i * 2 + 1]]);
+            attrs.push(v);
+        }
+        let Some(ip) = identifier_pos else { continue };
+        let ident = attrs[ip];
+        if ident == 0 {
+            continue;
+        }
+        per_ident.entry(ident).or_default().push(attrs);
+    }
+    let mut out: Vec<(u32, Vec<u8>)> = Vec::new();
+    for (ident, rows) in per_ident {
+        let mut buf = Vec::with_capacity(52);
+        buf.write_u32::<LittleEndian>(1).unwrap();
+        buf.write_u32::<LittleEndian>(0).unwrap();
+        buf.write_u32::<LittleEndian>(40).unwrap();
+        buf.write_u32::<LittleEndian>(keyformat.len() as u32).unwrap();
+        for &attr in keyformat {
+            // Apple always emits -1 for these "variable" attrs even when
+            // every rendition in the facet has the same value.
+            let always_variable = matches!(attr, 7 | 1 | 2 | 17);
+            if always_variable {
+                buf.write_i32::<LittleEndian>(-1).unwrap();
+                continue;
+            }
+            let attr_pos = keyformat.iter().position(|a| *a == attr).unwrap();
+            let mut mask: u32 = 0;
+            for row in &rows {
+                let v = row[attr_pos];
+                if v < 32 {
+                    mask |= 1u32 << v;
+                }
+            }
+            if mask == 0 {
+                mask = 1;
+            }
+            buf.write_u32::<LittleEndian>(mask).unwrap();
+        }
+        out.push((ident as u32, buf));
+    }
+    out.sort_by_key(|(k, _)| *k);
+    out
 }
 
 #[cfg(test)]
