@@ -1,6 +1,6 @@
 [package]
 name = "actool"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
 description = "Open reimplementation of Apple's actool for compiling xcassets and icons"
 license = "MIT"
