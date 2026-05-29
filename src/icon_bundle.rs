@@ -148,10 +148,16 @@ pub fn compile_icon_bundle(
         .any(|p| p.to_string_lossy().to_lowercase().ends_with(".svg"));
     let facet_prefix = bundle_facet_prefix(icon_path);
     let layer_assets = collect_layer_assets(icon_path, &parsed, &facet_prefix);
+    // Apple emits a `<stem>/<group_name>` facet for every group even when
+    // the group has no `name` field — anonymous groups fall back to the
+    // literal "Group" suffix. KYALauncher and tagspaces both rely on this.
     let group_facet_names: Vec<String> = parsed
         .groups
         .iter()
-        .filter_map(|g| g.name.as_ref().map(|n| format!("{facet_prefix}/{n}")))
+        .map(|g| {
+            let n = g.name.as_deref().unwrap_or("Group");
+            format!("{facet_prefix}/{n}")
+        })
         .collect();
     let (color_assets, gradient_assets) = if fill_is_automatic(parsed.fill.as_ref()) {
         automatic_fill_assets(&facet_prefix)
