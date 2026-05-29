@@ -85,6 +85,48 @@ pub fn bgra_to_best_format(
     (bgra_data, width, height, *b"BGRA")
 }
 
+/// Convert premultiplied BGRA pixels to premultiplied GA8 by collapsing
+/// the BGR channels to a single luma byte via BT.601 weights. Used by the
+/// .icon variant axis where every sized rendition is stored as a
+/// grayscale tinting mask. Forces conversion even when the source isn't
+/// already grayscale; the caller (icon_bundle::build_icon_car) decides
+/// when to use this based on the icon-level fill-specializations flag.
+pub fn bgra_to_ga8_force(bgra: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bgra.len() / 2);
+    for px in bgra.chunks_exact(4) {
+        // Pixels are premultiplied BGRA; the luma channel inherits the
+        // same alpha by virtue of being derived from the BGR components.
+        let b = px[0] as u32;
+        let g = px[1] as u32;
+        let r = px[2] as u32;
+        let a = px[3];
+        // BT.601 weights ×1000 rounded.
+        let y = (299 * r + 587 * g + 114 * b + 500) / 1000;
+        out.push(y as u8);
+        out.push(a);
+    }
+    out
+}
+
+/// Same as `bgra_to_ga8_force` but promotes luma + alpha to 16-bit. The
+/// 16-bit values repeat the byte (x | (x << 8)) so the low and high halves
+/// match — Apple uses the same convention for `61AG` (GA16) atlases.
+pub fn bgra_to_ga16_force(bgra: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bgra.len());
+    for px in bgra.chunks_exact(4) {
+        let b = px[0] as u32;
+        let g = px[1] as u32;
+        let r = px[2] as u32;
+        let a = px[3];
+        let y = (299 * r + 587 * g + 114 * b + 500) / 1000;
+        let y16 = (y << 8) | y;
+        let a16 = ((a as u16) << 8) | (a as u16);
+        out.extend_from_slice(&(y16 as u16).to_le_bytes());
+        out.extend_from_slice(&a16.to_le_bytes());
+    }
+    out
+}
+
 pub fn load_image_as_bgra(
     path: &Path,
     force_bgra: bool,

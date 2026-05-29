@@ -96,8 +96,18 @@ impl Atlas {
         )
     }
 
+    fn bpp_for_format(pf: &[u8]) -> usize {
+        // BGRA and "61AG" (GA16) both consume 4 bytes per pixel; GA8
+        // is the only 2-byte format we currently emit.
+        if pf == b"BGRA" || pf == b"61AG" {
+            4
+        } else {
+            2
+        }
+    }
+
     pub fn bytes_per_row(&self) -> usize {
-        let bpp: usize = if &self.pixel_format == b"BGRA" { 4 } else { 2 };
+        let bpp = Self::bpp_for_format(&self.pixel_format);
         let exact = self.width as usize * bpp;
         ((exact + 31) / 32) * 32
     }
@@ -105,7 +115,7 @@ impl Atlas {
     /// Blit all packed images into a single atlas pixel buffer. Rows are
     /// padded to 32-byte alignment to match the encoder's expected stride.
     pub fn render(&mut self) {
-        let bpp: usize = if &self.pixel_format == b"BGRA" { 4 } else { 2 };
+        let bpp = Self::bpp_for_format(&self.pixel_format);
         let bpr = self.bytes_per_row();
         let mut buf = vec![0u8; bpr * self.height as usize];
 

@@ -50,6 +50,11 @@ pub const PIXELFMT_JPEG: &[u8; 4] = b"GEPJ";
 pub fn colorspace_for_pixel_format(pixel_format: &[u8]) -> u32 {
     if pixel_format == b" 8AG" {
         2
+    } else if pixel_format == b"61AG" {
+        // GA16 (16-bit gray + 16-bit alpha) tracks Apple's extended-gray
+        // colorspace ID 6 — verified empirically against scrumdinger's
+        // alternate atlas + sized renditions.
+        6
     } else {
         1
     }

@@ -448,10 +448,23 @@ fn build_icon_car(
     // the alternate variant (same pixels — the variant axis is structural;
     // CUICatalog reads it to pick which alternate to display per-appearance).
     for (img_path, pixel_size, scale) in icon_images {
-        let (pd, w, h, pf) = load_image_as_bgra(img_path, false)?;
+        let (pd_bgra, w, h, pf_bgra) = load_image_as_bgra(img_path, false)?;
         let point_size = pixel_size / scale;
         let dim2 = icon_dim2(point_size);
         for &variant in variants {
+            // The variant axis is also a render-target switch: Apple stores
+            // the sized renditions as grayscale tinting masks. variant=0
+            // becomes GA8 (cspace=2), variant=1 becomes GA16 (cspace=6).
+            // When the axis is inactive (most fixtures), keep BGRA.
+            let (pd, pf, cs_id): (Vec<u8>, [u8; 4], u32) = if emit_variant_axis {
+                if variant == 0 {
+                    (crate::catalog::bgra_to_ga8_force(&pd_bgra), *b" 8AG", 2)
+                } else {
+                    (crate::catalog::bgra_to_ga16_force(&pd_bgra), *b"61AG", 6)
+                }
+            } else {
+                (pd_bgra.clone(), pf_bgra, car::colorspace_for_pixel_format(&pf_bgra))
+            };
             let name = pre_rendered_name(
                 icon_name,
                 point_size,
@@ -465,7 +478,7 @@ fn build_icon_car(
                     w,
                     h,
                 );
-                pi.pixel_data = pd.clone();
+                pi.pixel_data = pd;
                 pi.pixel_format = pf;
                 pi.scale = *scale;
                 pi.part = car::PART_ICON as u32;
@@ -481,7 +494,7 @@ fn build_icon_car(
                     scale: *scale as u16,
                     width: w,
                     height: h,
-                    pixel_data: pd.clone(),
+                    pixel_data: pd,
                     pixel_format: pf,
                     layout: car::LAYOUT_ONE_PART_SCALE,
                     dim2,
@@ -489,7 +502,7 @@ fn build_icon_car(
                     keyformat: placeholder_kf.clone(),
                     min_deploy: min_deploy.to_string(),
                     platform: platform.to_string(),
-                    colorspace_id: car::colorspace_for_pixel_format(&pf),
+                    colorspace_id: cs_id,
                     // Apple uses bitmapEncoding=0 (original) for the pre-rendered
                     // sized PNGs in .icon catalogs; the default (-1 → auto/4)
                     // sets the rendition_flags bit that makes CUICatalog look
@@ -515,9 +528,10 @@ fn build_icon_car(
             atlas.gamut = variant_idx as u32;
             atlas.render();
             let atlas_name = atlas.name();
-            // Apple uses LZFSE (not deepmap2) for atlases whose images are
-            // all icons in BGRA — both conditions hold here.
-            let force_lzfse = &pf == b"BGRA";
+            // Apple uses LZFSE (not deepmap2) for icon atlases regardless of
+            // pixel format — BGRA, GA8 (variant 0), and GA16 (variant 1) all
+            // go through LZFSE.
+            let force_lzfse = matches!(&pf, b"BGRA" | b" 8AG" | b"61AG");
             let atlas_csi = car::build_packed_asset_csi(
                 &atlas_name,
                 atlas.width,
