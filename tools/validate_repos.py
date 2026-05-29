@@ -50,7 +50,8 @@ def ensure_rust_actool_built() -> str:
 #   < 10.11  → uncompressed
 #   10.11    → LZFSE
 #   11.0     → DMP2
-DEPLOY_TARGETS = ["10.9", "10.11", "11.0", "14.0"]
+#   26.0     → Liquid glass
+DEPLOY_TARGETS = ["10.9", "10.11", "11.0", "14.0", "26.0"]
 
 
 def repo_slug(url: str) -> str:
