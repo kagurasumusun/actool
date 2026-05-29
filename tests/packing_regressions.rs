@@ -17,7 +17,7 @@ fn workspace_tmp(name: &str) -> PathBuf {
 fn make_imageset(parent: &Path, name: &str, channels: &str) -> anyhow::Result<()> {
     let iset = parent.join(format!("{name}.imageset"));
     fs::create_dir_all(&iset)?;
-    for (suffix, size, scale) in [("", 16u32, "1x"), ("@2x", 32u32, "2x")] {
+    for (suffix, size, _scale) in [("", 16u32, "1x"), ("@2x", 32u32, "2x")] {
         let filename = format!("{name}{suffix}.png");
         let img = match channels {
             "RGBA" => {
