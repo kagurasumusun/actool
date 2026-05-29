@@ -69,6 +69,12 @@ pub struct Layer {
     pub glass_specializations: Option<Vec<serde_json::Value>>,
     #[serde(default, rename = "fill-specializations")]
     pub fill_specializations: Option<Vec<serde_json::Value>>,
+    /// Per-layer fill (e.g. `{"solid": "extended-gray:0.84536,1.0"}` in
+    /// KYA's Logo layer). When the icon-level fill is a keyword like
+    /// "system-dark" Apple still appends a Color rendition derived from
+    /// each layer's structured fill.
+    #[serde(default)]
+    pub fill: Option<Fill>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -157,7 +157,7 @@ pub fn compile_icon_bundle(
         })
         .collect();
     let (color_assets, gradient_assets) =
-        fill_assets(&facet_prefix, parsed.fill.as_ref())
+        fill_assets(&facet_prefix, parsed.fill.as_ref(), &parsed)
             .unwrap_or_else(|| (Vec::new(), Vec::new()));
 
     let mut output_files: Vec<PathBuf> = Vec::new();
@@ -940,23 +940,105 @@ fn solid_fill_assets(
     Some((colors, gradients))
 }
 
+/// Apple's palette for `fill: "system-dark"` — observed in KYA:
+/// 3 colors (white anchor + mid-dark + deep-dark) plus TWO identical
+/// dark gradients. Per-layer fills are appended afterwards as Color-N+1.
+fn system_dark_fill_assets(facet_prefix: &str) -> (Vec<ColorAsset>, Vec<GradientAsset>) {
+    let n = |s: &str| format!("{facet_prefix}_Assets/{s}");
+    let g = |v: f32| (v as f32) as f64;
+    let colors = vec![
+        ColorAsset {
+            facet_name: n("Color-1"),
+            colorspace_id: 6,
+            components: vec![g(1.0), g(1.0)],
+        },
+        ColorAsset {
+            facet_name: n("Color-2"),
+            colorspace_id: 2,
+            components: vec![g(0.192), g(1.0)],
+        },
+        ColorAsset {
+            facet_name: n("Color-3"),
+            colorspace_id: 2,
+            components: vec![g(0.078), g(1.0)],
+        },
+    ];
+    let gradients = vec![
+        GradientAsset {
+            facet_name: n("Gradient-1"),
+            geometry: [0.5, 0.0, 0.5, 1.0],
+            stops: vec![(0.0, n("Color-2")), (1.0, n("Color-3"))],
+        },
+        GradientAsset {
+            facet_name: n("Gradient-2"),
+            geometry: [0.5, 0.0, 0.5, 1.0],
+            stops: vec![(0.0, n("Color-2")), (1.0, n("Color-3"))],
+        },
+    ];
+    (colors, gradients)
+}
+
+/// Append a Color-N rendition for each layer whose `fill` is a structured
+/// solid spec. Apple does this on top of the base palette derived from the
+/// icon-level fill — verified for KYA where the layer carries
+/// `extended-gray:0.84536,1.0` and Apple emits Color-4 for it.
+fn append_layer_fill_colors(
+    facet_prefix: &str,
+    json: &IconJson,
+    colors: &mut Vec<ColorAsset>,
+) {
+    for (_group, layer) in json.iter_layers() {
+        let Some(fill) = layer.fill.as_ref() else {
+            continue;
+        };
+        let Fill::Structured(v) = fill else {
+            continue;
+        };
+        let Some(spec) = v.get("solid").and_then(|s| s.as_str()) else {
+            continue;
+        };
+        let Some((cspace, comps)) = parse_color_spec(spec) else {
+            continue;
+        };
+        let next_idx = colors.len() + 1;
+        colors.push(ColorAsset {
+            facet_name: format!("{facet_prefix}_Assets/Color-{next_idx}"),
+            colorspace_id: cspace,
+            components: comps,
+        });
+    }
+}
+
 /// Try to derive Color/Gradient assets from an arbitrary fill spec.
 /// Returns None when the spec shape is unrecognized — caller falls back
 /// to no palette and the catalog stays self-consistent.
 fn fill_assets(
     facet_prefix: &str,
     fill: Option<&Fill>,
+    parsed: &IconJson,
 ) -> Option<(Vec<ColorAsset>, Vec<GradientAsset>)> {
     if fill_is_automatic(fill) {
-        return Some(automatic_fill_assets(facet_prefix));
+        let (mut colors, gradients) = automatic_fill_assets(facet_prefix);
+        append_layer_fill_colors(facet_prefix, parsed, &mut colors);
+        return Some((colors, gradients));
     }
-    let Fill::Structured(v) = fill? else {
-        return None;
-    };
-    if let Some(spec) = v.get("solid").and_then(|s| s.as_str()) {
-        return solid_fill_assets(facet_prefix, spec);
+    let fill_val = fill?;
+    match fill_val {
+        Fill::Keyword(k) if k == "system-dark" => {
+            let (mut colors, gradients) = system_dark_fill_assets(facet_prefix);
+            append_layer_fill_colors(facet_prefix, parsed, &mut colors);
+            Some((colors, gradients))
+        }
+        Fill::Structured(v) => {
+            if let Some(spec) = v.get("solid").and_then(|s| s.as_str()) {
+                let (mut colors, gradients) = solid_fill_assets(facet_prefix, spec)?;
+                append_layer_fill_colors(facet_prefix, parsed, &mut colors);
+                return Some((colors, gradients));
+            }
+            None
+        }
+        _ => None,
     }
-    None
 }
 
 /// Whether Apple's actool emits a standalone `.icns` alongside the catalog.
