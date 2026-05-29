@@ -350,6 +350,119 @@ def _parse_facetkeys(read_block, named):
     return facets
 
 
+def _parse_tree_header(read_block, named, name):
+    """Return the 29-byte tree-header fields for a named BOM tree.
+
+    These fields gate CUICatalog behavior in subtle ways that aren't
+    caught by walking the tree logically — e.g. `key_size` controls
+    whether CUICatalog expects an inline-key region after each leaf's
+    entry table.
+    """
+    if name not in named:
+        return None
+    raw = read_block(named[name])
+    if len(raw) < 29 or raw[:4] != b"tree":
+        return None
+    return {
+        "child_block": struct.unpack('>I', raw[8:12])[0],
+        "block_size": struct.unpack('>I', raw[12:16])[0],
+        "path_count": struct.unpack('>I', raw[16:20])[0],
+        "flag":       raw[20],
+        "key_size":   struct.unpack('>I', raw[21:25])[0],
+    }
+
+
+def _audit_leaf_layout(read_block, named, name, key_size_bytes=None):
+    """Audit the raw bytes of a tree's root leaf block.
+
+    Returns a dict describing how the leaf is organized, including
+    whether an inline-key region is present right after the entry
+    table (the cache CUICatalog reads to enumerate per-facet
+    renditions). When that region is missing or replaced by zeros,
+    `imagesWithName:` silently returns empty arrays even though
+    every separate key block is correct — exactly the bug that
+    survived this tool's previous logical-walk comparison.
+
+    If `key_size_bytes` is given, the inline-key region is checked
+    against the per-entry key blocks referenced by the leaf entries.
+    """
+    if name not in named:
+        return None
+    tree_raw = read_block(named[name])
+    if len(tree_raw) < 12 or tree_raw[:4] != b"tree":
+        return None
+    root_idx = struct.unpack('>I', tree_raw[8:12])[0]
+    leaf = read_block(root_idx)
+    if len(leaf) < 12:
+        return None
+    is_leaf = struct.unpack('>H', leaf[:2])[0]
+    cnt = struct.unpack('>H', leaf[2:4])[0]
+    if not is_leaf:
+        return {"is_leaf": False, "count": cnt, "size": len(leaf)}
+    entries_end = 12 + cnt * 8
+    info = {
+        "is_leaf": True,
+        "count": cnt,
+        "size": len(leaf),
+        "entries_end": entries_end,
+    }
+    if key_size_bytes and cnt > 0:
+        gap = leaf[entries_end:entries_end + 4]
+        info["pre_inline_gap_bytes"] = gap.hex()
+        # Apple inserts a 4-byte zero gap; the inline-key region starts
+        # immediately after.
+        inline_off = entries_end + 4
+        expected_inline_len = cnt * key_size_bytes
+        inline_region = leaf[inline_off:inline_off + expected_inline_len]
+        info["inline_region_offset"] = inline_off
+        info["inline_region_len"] = len(inline_region)
+        info["inline_region_all_zeros"] = (inline_region == b"\x00" * len(inline_region))
+        # Cross-check: reconstruct the inline blob from the entries'
+        # separately-stored key blocks and compare.
+        rebuilt = []
+        for i in range(cnt):
+            pos = 12 + i * 8
+            ki = struct.unpack('>I', leaf[pos + 4:pos + 8])[0]
+            key_block = read_block(ki)
+            rebuilt.append(key_block)
+        rebuilt_blob = b"".join(rebuilt)
+        info["inline_matches_rebuilt"] = (inline_region == rebuilt_blob)
+        if not info["inline_matches_rebuilt"]:
+            # Try shifting by 4 bytes (no gap variant) — surfaces the
+            # off-by-one we hit while reverse-engineering this layout.
+            shifted = leaf[entries_end:entries_end + expected_inline_len]
+            info["inline_matches_if_no_gap"] = (shifted == rebuilt_blob)
+    return info
+
+
+def _parse_bitmapkeys(read_block, named):
+    """Walk the BITMAPKEYS raw-key tree.
+
+    Returns {identifier(int): value_hex(str)} or None when the tree is
+    absent / empty. CUICatalog uses these per-facet attribute-value
+    masks during `imagesWithName:` — missing entries cause every
+    lookup to return an empty array.
+    """
+    if "BITMAPKEYS" not in named:
+        return None
+    tree_raw = read_block(named["BITMAPKEYS"])
+    if len(tree_raw) < 12 or tree_raw[:4] != b"tree":
+        return None
+    root_idx = struct.unpack('>I', tree_raw[8:12])[0]
+    leaf = read_block(root_idx)
+    if len(leaf) < 12:
+        return None
+    is_leaf, cnt = struct.unpack('>HH', leaf[:4])
+    out = {}
+    if is_leaf:
+        for i in range(cnt):
+            pos = 12 + i * 8
+            vi = struct.unpack('>I', leaf[pos:pos + 4])[0]
+            raw_key = struct.unpack('>I', leaf[pos + 4:pos + 8])[0]
+            out[raw_key] = read_block(vi).hex()
+    return out
+
+
 def parse_car(path: str) -> dict:
     """Parse a .car file into a dict suitable for comparison."""
     with open(path, 'rb') as f:
@@ -395,9 +508,39 @@ def parse_car(path: str) -> dict:
                     appearance_keys[aname] = struct.unpack_from(
                         '<H', val_bytes, 0)[0]
 
+    # Tree header fields (block_size, child block, path count, flag,
+    # key_size) — bypassed by the logical walker but read directly by
+    # CUICatalog.
+    tree_headers = {
+        n: _parse_tree_header(read_block, named, n)
+        for n in (
+            "FACETKEYS",
+            "APPEARANCEKEYS",
+            "RENDITIONS",
+            "BITMAPKEYS",
+        )
+        if n in named
+    }
+
+    # Audit raw leaf layout for each fixed-key tree. The inline-key
+    # region is what `imagesWithName:` actually reads; if it's missing
+    # or zero-filled, lookups silently return empty arrays.
+    fixed_key_bytes = (len(keyformat) * 2) if keyformat else None
+    leaf_audits = {
+        "FACETKEYS":      _audit_leaf_layout(read_block, named, "FACETKEYS"),
+        "APPEARANCEKEYS": _audit_leaf_layout(read_block, named, "APPEARANCEKEYS"),
+        "RENDITIONS":     _audit_leaf_layout(read_block, named, "RENDITIONS",
+                                             key_size_bytes=fixed_key_bytes),
+        "BITMAPKEYS":     _audit_leaf_layout(read_block, named, "BITMAPKEYS"),
+    }
+
+    bitmap_keys = _parse_bitmapkeys(read_block, named)
+
     return {
         "path": path,
         "file_size": len(data),
+        # Original BOM order (CUICatalog can be sensitive to this).
+        "named_blocks_order": list(named.keys()),
         "named_blocks": sorted(named.keys()),
         "keyformat": keyformat,
         "carheader": carheader,
@@ -405,6 +548,9 @@ def parse_car(path: str) -> dict:
         "facets": facets,
         "renditions": renditions,
         "appearance_keys": appearance_keys,
+        "tree_headers": tree_headers,
+        "leaf_audits": leaf_audits,
+        "bitmap_keys": bitmap_keys,
     }
 
 
@@ -625,6 +771,105 @@ def compare_cars(car_a: dict, car_b: dict, *,
             "only_a": sorted(blocks_a - blocks_b),
             "only_b": sorted(blocks_b - blocks_a),
         })
+    # CUICatalog scans blocks in BOM order; order divergence is sometimes
+    # behaviorally significant. Report when ORDER differs but membership
+    # is the same.
+    order_a = car_a.get("named_blocks_order", [])
+    order_b = car_b.get("named_blocks_order", [])
+    if blocks_a == blocks_b and order_a != order_b:
+        diffs.append({
+            "section": "named_blocks",
+            "field": "order",
+            "a": order_a,
+            "b": order_b,
+        })
+
+    # --- Tree headers (block_size, key_size flag) ---
+    th_a = car_a.get("tree_headers", {})
+    th_b = car_b.get("tree_headers", {})
+    for tname in sorted(set(th_a) | set(th_b)):
+        ha = th_a.get(tname)
+        hb = th_b.get(tname)
+        if ha is None or hb is None:
+            continue
+        for field in ("block_size", "path_count", "flag", "key_size"):
+            # `child_block` legitimately differs between any two BOM
+            # files because block numbering depends on emission order.
+            if ha.get(field) != hb.get(field):
+                diffs.append({
+                    "section": "tree_header",
+                    "tree": tname,
+                    "field": field,
+                    "a": ha.get(field),
+                    "b": hb.get(field),
+                })
+
+    # --- Leaf physical layout / inline-key region ---
+    la_a = car_a.get("leaf_audits", {}) or {}
+    la_b = car_b.get("leaf_audits", {}) or {}
+    for tname in sorted(set(la_a) | set(la_b)):
+        ia = la_a.get(tname)
+        ib = la_b.get(tname)
+        if not ia or not ib:
+            continue
+        # Different leaf SIZE for trees that should have matching
+        # leaves is a strong signal something is wrong.
+        if ia.get("size") != ib.get("size"):
+            diffs.append({
+                "section": "leaf_layout",
+                "tree": tname,
+                "field": "leaf_size",
+                "a": ia.get("size"),
+                "b": ib.get("size"),
+            })
+        # Inline-key region health checks — these surface the silent
+        # CUICatalog-lookup-failure mode that walking the tree
+        # logically (via `_walk_tree`) never sees.
+        for field in ("inline_matches_rebuilt",
+                       "inline_region_all_zeros",
+                       "pre_inline_gap_bytes",
+                       "inline_matches_if_no_gap"):
+            va = ia.get(field)
+            vb = ib.get(field)
+            if va != vb:
+                diffs.append({
+                    "section": "leaf_inline_keys",
+                    "tree": tname,
+                    "field": field,
+                    "a": va,
+                    "b": vb,
+                })
+
+    # --- BITMAPKEYS contents ---
+    bk_a = car_a.get("bitmap_keys")
+    bk_b = car_b.get("bitmap_keys")
+    if bk_a is None and bk_b is None:
+        pass  # both absent
+    elif bk_a is None or bk_b is None:
+        diffs.append({
+            "section": "bitmap_keys",
+            "field": "presence",
+            "a": "absent" if bk_a is None else f"{len(bk_a)} entries",
+            "b": "absent" if bk_b is None else f"{len(bk_b)} entries",
+        })
+    else:
+        keys_a = set(bk_a)
+        keys_b = set(bk_b)
+        if keys_a != keys_b:
+            diffs.append({
+                "section": "bitmap_keys",
+                "field": "identifiers",
+                "only_a": sorted(keys_a - keys_b),
+                "only_b": sorted(keys_b - keys_a),
+            })
+        for k in sorted(keys_a & keys_b):
+            if bk_a[k] != bk_b[k]:
+                diffs.append({
+                    "section": "bitmap_keys",
+                    "field": f"value@{k}",
+                    "a": bk_a[k],
+                    "b": bk_b[k],
+                })
 
     # --- Appearance keys ---
     ak_a = car_a.get("appearance_keys", {})
@@ -952,10 +1197,43 @@ def _format_text(report: dict, *, quiet: bool = False,
                 pr(f"[keyformat] A={diff['a']}  B={diff['b']}")
 
             elif section == "named_blocks":
-                if diff.get("only_a"):
-                    pr(f"[blocks] only in A: {diff['only_a']}")
-                if diff.get("only_b"):
-                    pr(f"[blocks] only in B: {diff['only_b']}")
+                if diff.get("field") == "order":
+                    pr(f"[blocks] order differs:")
+                    pr(f"  A: {diff['a']}")
+                    pr(f"  B: {diff['b']}")
+                else:
+                    if diff.get("only_a"):
+                        pr(f"[blocks] only in A: {diff['only_a']}")
+                    if diff.get("only_b"):
+                        pr(f"[blocks] only in B: {diff['only_b']}")
+
+            elif section == "tree_header":
+                pr(f"[tree_header {diff['tree']}] {diff['field']}: "
+                   f"A={diff['a']}  B={diff['b']}")
+
+            elif section == "leaf_layout":
+                pr(f"[leaf_layout {diff['tree']}] {diff['field']}: "
+                   f"A={diff['a']}  B={diff['b']}")
+
+            elif section == "leaf_inline_keys":
+                pr(f"[leaf_inline_keys {diff['tree']}] {diff['field']}: "
+                   f"A={diff['a']}  B={diff['b']}")
+                if diff['field'] == "inline_matches_rebuilt" and diff['b'] is False:
+                    pr(f"  ^ CUICatalog reads its rendition key cache from "
+                       f"this region; mismatch causes silent empty lookups")
+
+            elif section == "bitmap_keys":
+                if diff.get("field") == "presence":
+                    pr(f"[bitmap_keys] presence: "
+                       f"A={diff['a']}  B={diff['b']}")
+                elif diff.get("field") == "identifiers":
+                    if diff.get("only_a"):
+                        pr(f"[bitmap_keys] identifiers only in A: {diff['only_a']}")
+                    if diff.get("only_b"):
+                        pr(f"[bitmap_keys] identifiers only in B: {diff['only_b']}")
+                else:
+                    pr(f"[bitmap_keys] {diff['field']}: "
+                       f"A={diff['a']}  B={diff['b']}")
 
             elif section == "facets":
                 if "name" in diff:
