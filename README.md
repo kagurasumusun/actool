@@ -13,8 +13,7 @@ There is likely some missing functionality, in the unknown unknowns category.
 As more samples appear or issues get reported, better compatibility will be
 achieved.
 
-The target at this point is just macos behaviour and iOS-specific features may
-be missing. (please report those)
+The target at this point is just macos and iOS features.
 
 ## But why? 
 
