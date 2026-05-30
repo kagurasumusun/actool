@@ -264,6 +264,16 @@ pub struct Facet {
     pub identifier: u16,
 }
 
+/// One image entry from an `.appiconset`, retaining the metadata needed to
+/// build the iOS partial plist and loose home-screen PNGs.
+#[derive(Debug, Clone)]
+pub struct IconImage {
+    pub idiom: String,
+    pub point_w: u32,
+    pub scale: u32,
+    pub path: PathBuf,
+}
+
 impl AssetCatalog {
     pub fn new(
         path: PathBuf,
@@ -1245,6 +1255,53 @@ impl AssetCatalog {
             }
         }
         Ok(())
+    }
+
+    /// App-icon images with their idiom and point size preserved, for the iOS
+    /// partial-plist and loose-PNG emission (which key off idiom + home-screen
+    /// size). Unlike `get_icon_images` (macOS .icns input) this keeps the
+    /// idiom string and the declared point width, and skips vector sources.
+    pub fn get_appicon_images(&self) -> Result<Vec<IconImage>> {
+        let app_icon = match &self.app_icon {
+            Some(v) => v.clone(),
+            None => return Ok(Vec::new()),
+        };
+        let icon_dir = self.path.join(format!("{app_icon}.appiconset"));
+        let contents_path = icon_dir.join("Contents.json");
+        if !contents_path.exists() {
+            return Ok(Vec::new());
+        }
+        let contents = read_json(&contents_path)?;
+        let mut result = Vec::new();
+        if let Some(arr) = contents.get("images").and_then(|v| v.as_array()) {
+            for img_info in arr {
+                let Some(filename) = img_info.get("filename").and_then(|v| v.as_str())
+                else {
+                    continue;
+                };
+                let path = icon_dir.join(filename);
+                if !path.exists() {
+                    continue;
+                }
+                let idiom = img_info
+                    .get("idiom")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("universal")
+                    .to_string();
+                let size_str = img_info.get("size").and_then(|v| v.as_str()).unwrap_or("");
+                let point_w: u32 = size_str
+                    .split_once('x')
+                    .and_then(|(w, _)| w.parse().ok())
+                    .unwrap_or(0);
+                result.push(IconImage {
+                    idiom,
+                    point_w,
+                    scale: parse_scale(img_info),
+                    path,
+                });
+            }
+        }
+        Ok(result)
     }
 
     pub fn get_icon_images(&self) -> Result<Vec<(PathBuf, u32, u32)>> {

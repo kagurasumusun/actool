@@ -72,6 +72,51 @@ fn compile_ios(xcassets: &Path, out: &Path) {
     .expect("compile");
 }
 
+fn build_appicon_catalog(root: &Path, entries: &[(&str, &str, &str)]) {
+    let xc = root.join("A.xcassets");
+    let set = xc.join("AppIcon.appiconset");
+    std::fs::create_dir_all(&set).unwrap();
+    std::fs::write(
+        xc.join("Contents.json"),
+        r#"{"info":{"author":"xcode","version":1}}"#,
+    )
+    .unwrap();
+    let mut images = String::from("{\"images\":[");
+    for (i, (size, scale, idiom)) in entries.iter().enumerate() {
+        let pt: f64 = size.split('x').next().unwrap().parse().unwrap();
+        let px = (pt * scale[..1].parse::<f64>().unwrap()).round() as u32;
+        let fname = format!("i{px}.png");
+        write_png(&set.join(&fname), px, px, [64, 128, 192, 255]);
+        if i > 0 {
+            images.push(',');
+        }
+        images.push_str(&format!(
+            r#"{{"size":"{size}","idiom":"{idiom}","filename":"{fname}","scale":"{scale}"}}"#
+        ));
+    }
+    images.push_str("],\"info\":{\"author\":\"xcode\",\"version\":1}}");
+    std::fs::write(set.join("Contents.json"), images).unwrap();
+}
+
+fn compile_ios_icon(xcassets: &Path, out: &Path) {
+    let plist = out.join("partial.plist");
+    compiler::compile_catalog(
+        xcassets,
+        out,
+        "iphoneos",
+        "14.0",
+        Some("AppIcon"),
+        Some(&plist),
+        None,
+        None,
+        "default",
+        None,
+        None,
+        true,
+    )
+    .expect("compile");
+}
+
 fn read_u32_le(buf: &[u8], off: usize) -> u32 {
     u32::from_le_bytes(buf[off..off + 4].try_into().unwrap())
 }
@@ -160,4 +205,68 @@ fn ios_imageset_filters_mac_and_marketing_idioms() {
         !idioms.contains(&6),
         "ios-marketing (6) must be dropped from imagesets"
     );
+}
+
+#[test]
+fn ios_appicon_emits_loose_primary_pngs() {
+    let root = workspace_tmp("ios_appicon_loose");
+    build_appicon_catalog(
+        &root,
+        &[
+            ("60x60", "2x", "iphone"),
+            ("60x60", "3x", "iphone"),
+            ("76x76", "2x", "ipad"),
+            ("1024x1024", "1x", "ios-marketing"),
+        ],
+    );
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    compile_ios_icon(&root.join("A.xcassets"), &out);
+
+    // iPhone primary @2x and iPad primary @2x are emitted loose; the marketing
+    // (1024) icon is CAR-only and gets no loose file.
+    assert!(out.join("AppIcon60x60@2x.png").exists(), "iphone loose png");
+    assert!(
+        out.join("AppIcon76x76@2x~ipad.png").exists(),
+        "ipad loose png"
+    );
+    assert!(!out.join("AppIcon.icns").exists(), "no icns on iOS");
+}
+
+#[test]
+fn ios_appicon_partial_plist_has_cfbundleicons() {
+    let root = workspace_tmp("ios_appicon_plist");
+    build_appicon_catalog(
+        &root,
+        &[("60x60", "2x", "iphone"), ("76x76", "2x", "ipad")],
+    );
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    compile_ios_icon(&root.join("A.xcassets"), &out);
+
+    let plist = std::fs::read_to_string(out.join("partial.plist")).unwrap();
+    assert!(plist.contains("<key>CFBundleIcons</key>"));
+    assert!(plist.contains("<key>CFBundleIcons~ipad</key>"));
+    assert!(plist.contains("<key>CFBundlePrimaryIcon</key>"));
+    assert!(plist.contains("<string>AppIcon60x60</string>"));
+    assert!(plist.contains("<string>AppIcon76x76</string>"));
+    assert!(plist.contains("<key>CFBundleIconName</key>"));
+    // legacy macOS keys must NOT appear on iOS
+    assert!(!plist.contains("<key>CFBundleIconFile</key>"));
+}
+
+#[test]
+fn ios_appicon_ipad_files_only_with_ipad_icons() {
+    // iPhone-only set: CFBundleIcons~ipad carries just the name (no files).
+    let root = workspace_tmp("ios_appicon_iphone_only");
+    build_appicon_catalog(&root, &[("60x60", "2x", "iphone"), ("60x60", "3x", "iphone")]);
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    compile_ios_icon(&root.join("A.xcassets"), &out);
+
+    let plist = std::fs::read_to_string(out.join("partial.plist")).unwrap();
+    // The ~ipad dict exists but must not list AppIcon76x76 (no iPad icon).
+    assert!(plist.contains("<key>CFBundleIcons~ipad</key>"));
+    assert!(!plist.contains("AppIcon76x76"));
+    assert!(!out.join("AppIcon76x76@2x~ipad.png").exists());
 }

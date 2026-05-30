@@ -5,7 +5,7 @@
 
 use crate::bom::BomWriter;
 use crate::car::{self, RenditionKeyParts};
-use crate::catalog::{AssetCatalog, Facet};
+use crate::catalog::{AssetCatalog, Facet, IconImage};
 use crate::icns;
 use crate::packer::{self, PackedImage};
 use anyhow::Result;
@@ -348,7 +348,15 @@ pub fn compile_catalog(
     }
 
     if let Some(icon_name) = app_icon {
-        if standalone_icon_behavior != "none" {
+        if car::is_idiom_platform(platform) {
+            // iOS home-screen icons are emitted as loose PNGs (one per idiom,
+            // at @2x) alongside the CAR — not as an .icns bundle.
+            for loose in ios_loose_icons(&catalog.get_appicon_images()?, icon_name) {
+                let dest = output_dir.join(&loose.filename);
+                fs::copy(&loose.src, &dest)?;
+                output_files.push(fs::canonicalize(&dest).unwrap_or(dest));
+            }
+        } else if standalone_icon_behavior != "none" {
             let icons = catalog.get_icon_images()?;
             if !icons.is_empty() {
                 let icns_path = output_dir.join(format!("{icon_name}.icns"));
@@ -368,13 +376,17 @@ pub fn compile_catalog(
         } else {
             Vec::new()
         };
-        write_info_plist(
-            path,
-            app_icon,
-            accent_color,
-            widget_background_color,
-            &locales,
-        )?;
+        if let (true, Some(icon_name)) = (car::is_idiom_platform(platform), app_icon) {
+            write_ios_icon_plist(path, icon_name, &catalog.get_appicon_images()?)?;
+        } else {
+            write_info_plist(
+                path,
+                app_icon,
+                accent_color,
+                widget_background_color,
+                &locales,
+            )?;
+        }
         output_files.push(fs::canonicalize(path).unwrap_or(path.to_path_buf()));
     }
 
@@ -484,6 +496,117 @@ fn write_info_plist(
         }
         lines.push("\t</array>".to_string());
     }
+    lines.push("</dict>".to_string());
+    lines.push("</plist>".to_string());
+    lines.push(String::new());
+    fs::write(path, lines.join("\n"))?;
+    Ok(())
+}
+
+/// The iOS home-screen ("primary") app-icon point size for an idiom — the size
+/// listed in CFBundleIconFiles and emitted as a loose PNG. Smaller idiom sizes
+/// (notification/settings/spotlight) and the marketing icon are CAR-only.
+fn ios_primary_size(idiom: &str) -> Option<u32> {
+    match idiom {
+        "iphone" => Some(60),
+        "ipad" => Some(76),
+        _ => None,
+    }
+}
+
+struct LooseIcon {
+    filename: String,
+    src: PathBuf,
+}
+
+/// Loose home-screen PNGs actool drops next to the CAR: the @2x primary icon
+/// for each idiom present (`AppIcon60x60@2x.png`, `AppIcon76x76@2x~ipad.png`).
+fn ios_loose_icons(icons: &[IconImage], name: &str) -> Vec<LooseIcon> {
+    let mut out = Vec::new();
+    for idiom in ["iphone", "ipad"] {
+        let Some(primary) = ios_primary_size(idiom) else {
+            continue;
+        };
+        let Some(img) = icons
+            .iter()
+            .find(|i| i.idiom == idiom && i.point_w == primary && i.scale == 2)
+        else {
+            continue;
+        };
+        let ext = img
+            .path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("png");
+        let suffix = if idiom == "ipad" { "~ipad" } else { "" };
+        out.push(LooseIcon {
+            filename: format!("{name}{primary}x{primary}@2x{suffix}.{ext}"),
+            src: img.path.clone(),
+        });
+    }
+    out
+}
+
+/// CFBundleIconFiles base name (`AppIcon60x60`) for an idiom's primary icon,
+/// or empty when the catalog has no home-screen icon for that idiom.
+fn ios_icon_files(icons: &[IconImage], name: &str, idiom: &str) -> Vec<String> {
+    match ios_primary_size(idiom) {
+        Some(primary) if icons.iter().any(|i| i.idiom == idiom && i.point_w == primary) => {
+            vec![format!("{name}{primary}x{primary}")]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// iOS partial Info.plist: a `CFBundleIcons` (iPhone primary) and
+/// `CFBundleIcons~ipad` dict, each carrying `CFBundleIconName` and — when the
+/// idiom has home-screen icons — `CFBundleIconFiles`. The iPad list inherits
+/// the iPhone primaries (iPad falls back to them), matching host actool.
+fn write_ios_icon_plist(path: &Path, name: &str, icons: &[IconImage]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    let iphone_files = ios_icon_files(icons, name, "iphone");
+    // iPad lists its own primary (preceded by the iPhone fallback) only when it
+    // actually ships an iPad icon; with no iPad icons the dict carries just the
+    // name, matching host actool.
+    let ipad_primary = ios_icon_files(icons, name, "ipad");
+    let ipad_files = if ipad_primary.is_empty() {
+        Vec::new()
+    } else {
+        let mut v = iphone_files.clone();
+        v.extend(ipad_primary);
+        v
+    };
+
+    let mut lines = vec![
+        r#"<?xml version="1.0" encoding="UTF-8"?>"#.to_string(),
+        r#"<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">"#.to_string(),
+        r#"<plist version="1.0">"#.to_string(),
+        "<dict>".to_string(),
+    ];
+    let mut emit_primary = |key: &str, files: &[String]| {
+        lines.push(format!("\t<key>{key}</key>"));
+        lines.push("\t<dict>".to_string());
+        lines.push("\t\t<key>CFBundlePrimaryIcon</key>".to_string());
+        lines.push("\t\t<dict>".to_string());
+        if !files.is_empty() {
+            lines.push("\t\t\t<key>CFBundleIconFiles</key>".to_string());
+            lines.push("\t\t\t<array>".to_string());
+            for f in files {
+                lines.push(format!("\t\t\t\t<string>{f}</string>"));
+            }
+            lines.push("\t\t\t</array>".to_string());
+        }
+        lines.push("\t\t\t<key>CFBundleIconName</key>".to_string());
+        lines.push(format!("\t\t\t<string>{name}</string>"));
+        lines.push("\t\t</dict>".to_string());
+        lines.push("\t</dict>".to_string());
+    };
+    emit_primary("CFBundleIcons", &iphone_files);
+    emit_primary("CFBundleIcons~ipad", &ipad_files);
     lines.push("</dict>".to_string());
     lines.push("</plist>".to_string());
     lines.push(String::new());
