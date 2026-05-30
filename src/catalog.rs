@@ -738,6 +738,20 @@ impl AssetCatalog {
                 continue;
             }
 
+            // App-icon renditions carry their device idiom on iOS (phone=1,
+            // pad=2, marketing=6) so per-device icon lookups resolve. macOS
+            // app icons stay idiom-less.
+            let idiom_num = if car::is_idiom_platform(&self.platform) {
+                let idiom = img_info
+                    .get("idiom")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("universal");
+                car::idiom_value(idiom)
+            } else {
+                0
+            };
+            let icon_rend_start = renditions.len();
+
             let lower_filename = filename.to_ascii_lowercase();
             let scale = parse_scale(img_info);
             let size_str = img_info.get("size").and_then(|v| v.as_str()).unwrap_or("");
@@ -808,6 +822,7 @@ impl AssetCatalog {
                         icon_renditions.push((point_w, point_w * raster_scale as u32));
                     }
                 }
+                stamp_idiom(renditions, icon_rend_start, idiom_num);
                 continue;
             }
 
@@ -833,6 +848,7 @@ impl AssetCatalog {
                 platform: self.platform.clone(),
                 ..Rendition::default()
             });
+            stamp_idiom(renditions, icon_rend_start, idiom_num);
             icon_renditions.push((point_w, pixel_size));
         }
 

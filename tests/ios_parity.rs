@@ -270,3 +270,36 @@ fn ios_appicon_ipad_files_only_with_ipad_icons() {
     assert!(!plist.contains("AppIcon76x76"));
     assert!(!out.join("AppIcon76x76@2x~ipad.png").exists());
 }
+
+#[test]
+fn ios_appicon_renditions_carry_device_idiom() {
+    let root = workspace_tmp("ios_appicon_idiom");
+    build_appicon_catalog(
+        &root,
+        &[
+            ("60x60", "2x", "iphone"),
+            ("60x60", "3x", "iphone"),
+            ("1024x1024", "1x", "ios-marketing"),
+        ],
+    );
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    compile_ios_icon(&root.join("A.xcassets"), &out);
+
+    let car = std::fs::read(out.join("Assets.car")).expect("car");
+    let kf = keyformat(&car);
+    let idiom_col = kf.iter().position(|t| *t == 15).expect("idiom column");
+
+    // App-icon image renditions encode their idiom: phone(1) and marketing(6).
+    let mut seen = std::collections::HashSet::new();
+    for i in (0..car.len().saturating_sub(kf.len() * 2)).step_by(2) {
+        let cols: Vec<u16> = (0..kf.len())
+            .map(|c| u16::from_le_bytes(car[i + c * 2..i + c * 2 + 2].try_into().unwrap()))
+            .collect();
+        if cols[0] == 0 && cols[1] == 0 && (cols[idiom_col] == 1 || cols[idiom_col] == 6) {
+            seen.insert(cols[idiom_col]);
+        }
+    }
+    assert!(seen.contains(&1), "expected a phone (1) icon rendition");
+    assert!(seen.contains(&6), "expected a marketing (6) icon rendition");
+}
