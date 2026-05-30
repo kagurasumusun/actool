@@ -12,6 +12,42 @@ use std::io::Write;
 pub const KEYFORMAT_ALL: &[u16] = &[7, 13, 1, 2, 3, 4, 17, 8, 9, 11, 12, 24];
 pub const KEYFORMAT_OPTIONAL: &[u16] = &[4, 8, 9];
 
+// iOS/tvOS catalogs use a fixed key format that carries Idiom (attr 15) and
+// Subtype (attr 16) and omits the macOS-only Size/Layer columns. Verified
+// against `/usr/bin/actool --platform iphoneos`: the same eight columns are
+// emitted regardless of which idioms the renditions actually use.
+pub const KEYFORMAT_IOS: &[u16] = &[7, 13, 12, 15, 16, 17, 1, 2];
+
+/// True for the device-family platforms whose catalogs encode idiom in the
+/// rendition key (iOS and its simulator). macOS keeps the legacy layout.
+pub fn is_idiom_platform(platform: &str) -> bool {
+    matches!(platform, "iphoneos" | "iphonesimulator")
+}
+
+/// CoreUI deployment-platform string written into EXTENDED_METADATA. actool
+/// records the device family ("ios"), not the SDK name ("iphoneos").
+pub fn deployment_platform_name(platform: &str) -> &str {
+    match platform {
+        "iphoneos" | "iphonesimulator" => "ios",
+        other => other,
+    }
+}
+
+/// Numeric value for an asset-catalog `idiom` string, as encoded in rendition
+/// key attribute 15. Values match CoreUI's `kCoreThemeIdiom*` enum.
+pub fn idiom_value(idiom: &str) -> u16 {
+    match idiom {
+        "universal" => 0,
+        "iphone" | "phone" => 1,
+        "ipad" | "pad" => 2,
+        "tv" | "appletv" => 3,
+        "car" | "carplay" => 4,
+        "watch" => 5,
+        "ios-marketing" | "marketing" => 6,
+        _ => 0,
+    }
+}
+
 pub const DIRECTION_DEFAULT: u16 = 0;
 pub const DIRECTION_RTL: u16 = 4;
 pub const DIRECTION_LTR: u16 = 5;
@@ -149,6 +185,17 @@ pub fn make_carheader(rendition_count: u32) -> Vec<u8> {
 /// the layered-image renditions; lower values cause silent lookup
 /// failures (`imagesWithName:` returns empty arrays).
 pub fn make_carheader_versioned(rendition_count: u32, coreui_version: u32) -> Vec<u8> {
+    make_carheader_full(rendition_count, coreui_version, 1)
+}
+
+/// CARHEADER builder exposing the key-semantics field (offset 432). macOS and
+/// .icon catalogs use 1; idiom platforms (iOS) declare 2, which tells CoreUI
+/// the rendition keys carry an idiom column.
+pub fn make_carheader_full(
+    rendition_count: u32,
+    coreui_version: u32,
+    key_semantics: u32,
+) -> Vec<u8> {
     let mut buf = vec![0u8; 436];
     buf[0..4].copy_from_slice(b"RATC");
     (&mut buf[4..8]).write_u32::<LittleEndian>(coreui_version).unwrap();
@@ -165,7 +212,9 @@ pub fn make_carheader_versioned(rendition_count: u32, coreui_version: u32) -> Ve
     // uuid at 404 = zeros; checksum at 420 = zero.
     (&mut buf[424..428]).write_u32::<LittleEndian>(2).unwrap();
     (&mut buf[428..432]).write_u32::<LittleEndian>(1).unwrap();
-    (&mut buf[432..436]).write_u32::<LittleEndian>(1).unwrap();
+    (&mut buf[432..436])
+        .write_u32::<LittleEndian>(key_semantics)
+        .unwrap();
     buf
 }
 
@@ -174,7 +223,7 @@ pub fn make_extended_metadata(platform: &str, min_deploy: &str) -> Vec<u8> {
     buf[0..4].copy_from_slice(b"META");
     let d = min_deploy.as_bytes();
     buf[260..260 + d.len()].copy_from_slice(d);
-    let p = platform.as_bytes();
+    let p = deployment_platform_name(platform).as_bytes();
     buf[516..516 + p.len()].copy_from_slice(p);
     let tool = b"actool";
     buf[772..772 + tool.len()].copy_from_slice(tool);
@@ -205,6 +254,12 @@ pub struct RenditionKeyParts {
     pub dim2: u16,
     pub layer: u16,
     pub scale: u16,
+    /// Attribute 15 — device idiom (universal=0, phone=1, pad=2, …). Only
+    /// present in the key on idiom platforms (iOS); 0 elsewhere.
+    pub idiom: u16,
+    /// Attribute 16 — idiom subtype (e.g. plus-phone displays). 0 unless an
+    /// asset declares a subtype.
+    pub subtype: u16,
     /// Attribute 24 — Apple's appearance-specialization axis. 0 = primary,
     /// 1+ = alternate variants emitted when icon.json has top-level
     /// `fill-specializations`.
@@ -226,6 +281,8 @@ pub fn make_rendition_key(parts: RenditionKeyParts, keyformat: &[u16]) -> Vec<u8
             9 => parts.dim2,
             11 => parts.layer,
             12 => parts.scale,
+            15 => parts.idiom,
+            16 => parts.subtype,
             24 => parts.variant,
             _ => 0,
         };
@@ -1249,6 +1306,11 @@ pub struct Rendition {
     pub dim2: u16,
     pub appearance: u16,
     pub direction: u16,
+    /// Device idiom (key attribute 15). 0 = universal; only encoded into the
+    /// rendition key on idiom platforms (iOS).
+    pub idiom: u16,
+    /// Idiom subtype (key attribute 16). 0 unless the asset declares one.
+    pub subtype: u16,
     pub is_template: bool,
     /// bitmapEncoding: -1=auto, 0=original, 4=automatic, 2=template
     pub template_rendering_intent: i32,
@@ -1290,6 +1352,8 @@ impl Default for Rendition {
             dim2: 0,
             appearance: 0,
             direction: 0,
+            idiom: 0,
+            subtype: 0,
             is_template: false,
             template_rendering_intent: -1,
             colorspace_id: 1,
@@ -1369,6 +1433,8 @@ impl Rendition {
             dim2: self.dim2,
             layer: 0,
             scale: self.scale,
+            idiom: self.idiom,
+            subtype: self.subtype,
             variant: self.variant,
         };
         make_rendition_key(parts, &self.keyformat)
@@ -1572,6 +1638,8 @@ mod tests {
             dim2: 0,
             layer: 0,
             scale: 2,
+            idiom: 0,
+            subtype: 0,
             variant: 0,
         };
         let k = make_rendition_key(p, &[7, 13, 1, 2, 3, 17, 11, 12]);

@@ -433,12 +433,30 @@ impl AssetCatalog {
                 .get("idiom")
                 .and_then(|v| v.as_str())
                 .unwrap_or("universal");
-            if self.platform == "macosx" && idiom != "mac" && idiom != "universal" {
+            // Drop renditions whose idiom doesn't belong to the target
+            // platform. iOS keeps iphone/ipad/universal; `ios-marketing` is
+            // an app-icon-only idiom and is dropped from regular imagesets,
+            // matching `/usr/bin/actool --platform iphoneos`.
+            let idiom_applies = match self.platform.as_str() {
+                "macosx" => idiom == "mac" || idiom == "universal",
+                "iphoneos" | "iphonesimulator" => {
+                    matches!(idiom, "iphone" | "ipad" | "universal")
+                }
+                _ => true,
+            };
+            if !idiom_applies {
                 continue;
             }
             if self.platform == "macosx" && scale > 2 {
                 continue;
             }
+            // Idiom is only encoded into the rendition key on idiom platforms;
+            // macOS keys omit attribute 15 entirely.
+            let idiom_num = if car::is_idiom_platform(&self.platform) {
+                car::idiom_value(idiom)
+            } else {
+                0
+            };
 
             let locale = img_info
                 .get("locale")
@@ -463,6 +481,10 @@ impl AssetCatalog {
                 .unwrap_or(car::DIRECTION_DEFAULT);
             let appearance = appearance_from_json(img_info);
 
+            // Renditions added below all share this image entry's idiom; stamp
+            // them in one place rather than threading idiom_num through every
+            // Rendition literal (PDF/JPEG/SVG/PNG branches).
+            let img_rend_start = renditions.len();
             let lower_filename = filename.to_ascii_lowercase();
             if lower_filename.ends_with(".pdf") {
                 let pdf_data = fs::read(&img_path)?;
@@ -527,6 +549,7 @@ impl AssetCatalog {
                         ..Rendition::default()
                     });
                 }
+                stamp_idiom(renditions, img_rend_start, idiom_num);
                 continue;
             }
 
@@ -558,6 +581,7 @@ impl AssetCatalog {
                     // emit a loose file alongside the compiled output.
                     self.loose_jpegs.push((name.clone(), img_path.clone()));
                 }
+                stamp_idiom(renditions, img_rend_start, idiom_num);
                 continue;
             }
 
@@ -620,6 +644,7 @@ impl AssetCatalog {
                         }
                     }
                 }
+                stamp_idiom(renditions, img_rend_start, idiom_num);
                 continue;
             }
 
@@ -645,6 +670,7 @@ impl AssetCatalog {
                 platform: self.platform.clone(),
                 ..Rendition::default()
             });
+            stamp_idiom(renditions, img_rend_start, idiom_num);
         }
         if count_before < renditions.len() {
             facets.insert(
@@ -1260,6 +1286,18 @@ impl AssetCatalog {
             }
         }
         Ok(result)
+    }
+}
+
+/// Stamp the device idiom onto every rendition appended since `start`. Used to
+/// tag all of an image entry's renditions (a PDF/SVG entry expands into several)
+/// without repeating `idiom` in each Rendition literal.
+fn stamp_idiom(renditions: &mut [Rendition], start: usize, idiom: u16) {
+    if idiom == 0 {
+        return;
+    }
+    for r in &mut renditions[start..] {
+        r.idiom = idiom;
     }
 }
 

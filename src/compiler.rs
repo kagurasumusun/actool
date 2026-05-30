@@ -80,7 +80,13 @@ pub fn compile_catalog(
         trial_atlas_count += packer::pack_images_split(imgs, 262, 196).len();
     }
     let uses_dim1 = trial_atlas_count > trial_scales.len();
-    let keyformat = car::compute_keyformat(&renditions, uses_dim1);
+    // iOS catalogs use a fixed idiom-carrying key format; macOS trims its key
+    // columns to the attributes actually used.
+    let keyformat = if car::is_idiom_platform(platform) {
+        car::KEYFORMAT_IOS.to_vec()
+    } else {
+        car::compute_keyformat(&renditions, uses_dim1)
+    };
 
     for rend in &mut renditions {
         rend.has_icon = has_icon;
@@ -260,7 +266,17 @@ pub fn compile_catalog(
     all_entries.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut bom = BomWriter::new();
-    bom.add_named_block("CARHEADER", car::make_carheader(all_entries.len() as u32));
+    // iOS catalogs declare CoreUI 975 and key-semantics 2 (idiom-aware keys);
+    // macOS stays on the legacy 972 / key-semantics 1 pairing.
+    let (coreui_ver, key_semantics) = if car::is_idiom_platform(platform) {
+        (975, 2)
+    } else {
+        (972, 1)
+    };
+    bom.add_named_block(
+        "CARHEADER",
+        car::make_carheader_full(all_entries.len() as u32, coreui_ver, key_semantics),
+    );
     bom.set_inline_key_size(Some(keyformat.len() * 2));
     bom.add_tree("RENDITIONS", &all_entries, 4096);
     bom.set_inline_key_size(None);
@@ -277,7 +293,20 @@ pub fn compile_catalog(
     bom.add_tree("FACETKEYS", &facetkey_entries, 4096);
 
     let has_appearances = renditions.iter().any(|r| r.appearance != 0);
-    if has_appearances {
+    if car::is_idiom_platform(platform) {
+        // iOS always emits APPEARANCEKEYS, declaring the wildcard appearance
+        // (UIAppearanceAny=0) even when no asset has a dark variant.
+        let mut ap_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        let mut v_any = Vec::new();
+        v_any.write_u16::<LittleEndian>(0).unwrap();
+        ap_entries.push((b"UIAppearanceAny".to_vec(), v_any));
+        if has_appearances {
+            let mut v_dark = Vec::new();
+            v_dark.write_u16::<LittleEndian>(1).unwrap();
+            ap_entries.push((b"UIAppearanceDark".to_vec(), v_dark));
+        }
+        bom.add_tree("APPEARANCEKEYS", &ap_entries, 4096);
+    } else if has_appearances {
         let mut ap_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         let mut v1 = Vec::new();
         v1.write_u16::<LittleEndian>(1).unwrap();
