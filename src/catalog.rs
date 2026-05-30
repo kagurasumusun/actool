@@ -739,7 +739,8 @@ impl AssetCatalog {
             .cloned()
             .unwrap_or_default();
 
-        let mut icon_renditions: Vec<(u32, u16)> = Vec::new(); // (point_w, idiom)
+        let appicon_start = renditions.len();
+        let mut icon_renditions: Vec<(u32, u16, u16)> = Vec::new(); // (point_w, idiom, subtype)
         for img_info in &images {
             let Some(filename) = img_info.get("filename").and_then(|v| v.as_str()) else {
                 continue;
@@ -838,7 +839,7 @@ impl AssetCatalog {
                             platform: self.platform.clone(),
                             ..Rendition::default()
                         });
-                        icon_renditions.push((point_w, idiom_num));
+                        icon_renditions.push((point_w, idiom_num, 0));
                     }
                 }
                 stamp_idiom(renditions, icon_rend_start, idiom_num);
@@ -867,28 +868,52 @@ impl AssetCatalog {
                 ..Rendition::default()
             });
             stamp_idiom(renditions, icon_rend_start, idiom_num);
-            icon_renditions.push((point_w, idiom_num));
+            icon_renditions.push((point_w, idiom_num, 0));
         }
 
         if icon_renditions.is_empty() {
             return Ok(());
         }
 
-        // Group the icon point sizes by idiom and emit one MultiSized
-        // rendition per idiom. iOS keys each by idiom (attr 15), so phone,
-        // pad and marketing get their own icon facet; macOS uses idiom 0
+        // iPhone Plus/Max: actool synthesizes a 90pt@2x icon (subtype 1792)
+        // by reusing the 60pt@3x source — both are 180px — whenever that icon
+        // is present. It also gets its own phone/subtype-1792 multisize facet.
+        if car::is_idiom_platform(&self.platform) {
+            let dim2_60 = self.icon_size_index(60);
+            let src = renditions[appicon_start..]
+                .iter()
+                .find(|r| {
+                    r.idiom == car::idiom_value("iphone")
+                        && r.scale == 3
+                        && r.dim2 == dim2_60
+                        && r.part == car::PART_ICON
+                })
+                .cloned();
+            if let Some(mut synth) = src {
+                synth.scale = 2;
+                synth.subtype = 1792;
+                synth.dim2 = self.icon_size_index(90);
+                renditions.push(synth);
+                icon_renditions.push((90, car::idiom_value("iphone"), 1792));
+            }
+        }
+
+        // Group the icon point sizes by (idiom, subtype) and emit one
+        // MultiSized rendition per group. iOS keys each by idiom (attr 15) and
+        // subtype (attr 16), so phone, pad, marketing and the Plus-phone
+        // subtype-1792 facet are distinct; macOS uses idiom 0 / subtype 0
         // throughout, collapsing to the single combined facet as before.
-        let mut sizes_by_idiom: IndexMap<u16, Vec<u32>> = IndexMap::new();
-        for (point_w, idiom) in &icon_renditions {
-            let sizes = sizes_by_idiom.entry(*idiom).or_default();
+        let mut sizes_by_group: IndexMap<(u16, u16), Vec<u32>> = IndexMap::new();
+        for (point_w, idiom, subtype) in &icon_renditions {
+            let sizes = sizes_by_group.entry((*idiom, *subtype)).or_default();
             if !sizes.contains(point_w) {
                 sizes.push(*point_w);
             }
         }
-        let mut idioms: Vec<u16> = sizes_by_idiom.keys().copied().collect();
-        idioms.sort_unstable();
-        for idiom in idioms {
-            let mut sizes = sizes_by_idiom.shift_remove(&idiom).unwrap();
+        let mut groups: Vec<(u16, u16)> = sizes_by_group.keys().copied().collect();
+        groups.sort_unstable();
+        for (idiom, subtype) in groups {
+            let mut sizes = sizes_by_group.shift_remove(&(idiom, subtype)).unwrap();
             // Apple lists multisize entries in ascending point-size order; our
             // discovery order is filesystem-defined ("128" sorts before "16").
             sizes.sort_unstable();
@@ -902,6 +927,7 @@ impl AssetCatalog {
                 .collect();
             let mut ms_rend = car::build_multisize_rendition(&name, ident, &ms_entries);
             ms_rend.idiom = idiom;
+            ms_rend.subtype = subtype;
             renditions.push(ms_rend);
         }
 

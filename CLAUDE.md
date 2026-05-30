@@ -318,6 +318,8 @@ Done: the key format now byte-matches Apple's `[7,13,12,15,16,9,8,17,1,2]`.
 
 Done: **per-idiom MultiSized renditions** (`catalog::parse_appiconset` groups icon sizes by idiom and emits one MultiSized rendition per idiom, setting `idiom` on each so the key carries attr 15). MSIS entries are plain (w,h,index) triples — the idiom lives in the rendition key, not the entries. We now match phone `{20:1,29:2,40:3,60:4}`, pad `{20:1,29:2,40:3,76:5,83:6}`, marketing `{1024:8}`.
 
-Remaining (matched renditions ~19/29 vs reference; the CAR loads):
-- **Subtype 1792 (Plus/Max phone) synthesis**: actool generates a 90pt@2x icon (180px) by reusing the 60pt@3x (180px) source, with subtype=1792 on both the leaf and a *dedicated* phone multisize `{90:7}` (the one per-idiom-split facet we don't yet emit).
+Done: **subtype-1792 Plus-phone synthesis** (`catalog::parse_appiconset`). When a 60pt@3x iPhone icon is present, actool synthesizes a 90pt@2x icon (subtype 1792) reusing that 180px source, plus a dedicated phone/subtype-1792 multisize `{90:7}`. We clone the 60pt@3x rendition (scale→2, subtype→1792, dim2→7), and the multisize grouping keys by (idiom, subtype). The synthesized leaf is forced inline (`packer`: subtype≠0 → inline). Rendition count now matches the reference exactly (29=29); matched 23/29.
+
+Remaining (the CAR loads; only atlas geometry differs):
+- **Atlas geometry**: our shelf packer's atlas widths/contents differ from Apple's, so the packed atlas bytes and names (`…-2.0.0-…` vs Apple's `…-2.1.0-…`) aren't identical. All non-atlas renditions match.
 - **Atlas geometry**: our shelf packer's atlas widths/contents differ from Apple's (e.g. atlas name `…-2.0.0-…` vs Apple's `…-2.1.0-…`), so packed bytes aren't identical. (dim1 itself now resets per (scale, idiom) — `dim1_by_scale` is keyed by `(scale, idiom)` — so the atlas-key dim1 values match Apple even though the geometry doesn't.)

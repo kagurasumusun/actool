@@ -336,6 +336,12 @@ pub fn group_for_packing(
             force_inline.push(i);
             continue;
         }
+        // Subtype-specialized icons (the synthesized 90pt Plus-phone, subtype
+        // 1792) are stored inline by actool, not packed into an atlas.
+        if rend.subtype != 0 {
+            force_inline.push(i);
+            continue;
+        }
         if rend.csi_override.is_some() {
             force_inline.push(i);
             continue;

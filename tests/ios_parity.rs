@@ -440,3 +440,82 @@ fn ios_appicon_multisize_split_per_idiom() {
         );
     }
 }
+
+#[test]
+fn ios_appicon_synthesizes_plus_phone_subtype_1792() {
+    let root = workspace_tmp("ios_appicon_subtype");
+    // A 60pt@3x iPhone icon triggers the synthesized 90pt@2x Plus-phone icon.
+    build_appicon_catalog(
+        &root,
+        &[
+            ("60x60", "2x", "iphone"),
+            ("60x60", "3x", "iphone"),
+            ("1024x1024", "1x", "ios-marketing"),
+        ],
+    );
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    compile_ios_icon(&root.join("A.xcassets"), &out);
+
+    let car = std::fs::read(out.join("Assets.car")).expect("car");
+    let kf = keyformat(&car);
+    let sub_col = kf.iter().position(|t| *t == 16).unwrap();
+    let part_col = kf.iter().position(|t| *t == 2).unwrap();
+    let d2_col = kf.iter().position(|t| *t == 9).unwrap();
+    let scale_col = kf.iter().position(|t| *t == 12).unwrap();
+
+    let mut multisize_1792 = false;
+    let mut leaf_1792 = false;
+    for i in (0..car.len().saturating_sub(kf.len() * 2)).step_by(2) {
+        let c: Vec<u16> = (0..kf.len())
+            .map(|x| u16::from_le_bytes(car[i + x * 2..i + x * 2 + 2].try_into().unwrap()))
+            .collect();
+        if c[0] != 0 || c[1] != 0 || c[sub_col] != 1792 {
+            continue;
+        }
+        // Multisize facet (part 218, scale 1) and the 90pt leaf (part 220,
+        // scale 2, dim2 index 7).
+        if c[part_col] == 218 {
+            multisize_1792 = true;
+        }
+        if c[part_col] == 220 && c[scale_col] == 2 && c[d2_col] == 7 {
+            leaf_1792 = true;
+        }
+    }
+    assert!(multisize_1792, "expected a subtype-1792 multisize facet");
+    assert!(leaf_1792, "expected a subtype-1792 90pt leaf icon");
+}
+
+#[test]
+fn ios_appicon_no_subtype_without_60pt_at_3x() {
+    let root = workspace_tmp("ios_appicon_no_subtype");
+    // No 60pt@3x -> no Plus-phone synthesis.
+    build_appicon_catalog(
+        &root,
+        &[("60x60", "2x", "iphone"), ("1024x1024", "1x", "ios-marketing")],
+    );
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    compile_ios_icon(&root.join("A.xcassets"), &out);
+
+    let car = std::fs::read(out.join("Assets.car")).expect("car");
+    let kf = keyformat(&car);
+    let sub_col = kf.iter().position(|t| *t == 16).unwrap();
+    let part_col = kf.iter().position(|t| *t == 2).unwrap();
+    let mut any_1792 = false;
+    for i in (0..car.len().saturating_sub(kf.len() * 2)).step_by(2) {
+        let c: Vec<u16> = (0..kf.len())
+            .map(|x| u16::from_le_bytes(car[i + x * 2..i + x * 2 + 2].try_into().unwrap()))
+            .collect();
+        // Constrain to real icon/multisize renditions; the bare value 0x0700
+        // (1792) also occurs in unrelated key/metadata bytes.
+        if c[0] == 0
+            && c[1] == 0
+            && c[sub_col] == 1792
+            && (c[part_col] == 218 || c[part_col] == 220)
+        {
+            any_1792 = true;
+        }
+    }
+    assert!(!any_1792, "no subtype-1792 expected without a 60pt@3x icon");
+}
