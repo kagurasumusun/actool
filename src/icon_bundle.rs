@@ -111,8 +111,11 @@ fn icon_dim2(point_size: u32) -> u16 {
 }
 
 pub fn is_icon_bundle(path: &Path) -> bool {
+    // Dispatch on `.icon` extension alone. `compile_icon_bundle` produces
+    // a clean error when the path isn't a directory or icon.json is missing,
+    // rather than silently falling through to the legacy xcassets path
+    // (which emits an empty info.plist and no Assets.car).
     path.extension().and_then(|s| s.to_str()) == Some("icon")
-        && path.join("icon.json").exists()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -137,9 +140,25 @@ pub fn compile_icon_bundle(
     let icon_name = app_icon.map(|s| s.to_string()).unwrap_or(bundle_stem.clone());
 
     let icon_json_path = icon_path.join("icon.json");
-    let icon_json_text = fs::read_to_string(&icon_json_path)?;
+    let icon_json_text = fs::read_to_string(&icon_json_path).map_err(|e| {
+        anyhow::anyhow!("could not read {}: {e}", icon_json_path.display())
+    })?;
     let icon_json_value: serde_json::Value = serde_json::from_str(&icon_json_text)?;
     let parsed: IconJson = IconJson::parse(&icon_json_text)?;
+
+    // Apple errors on `{}` (no `groups` key) but accepts `{"groups": []}`.
+    // The serde-default Vec collapses both cases, so detect the distinction
+    // on the raw JSON value before falling through to layer validation.
+    if icon_json_value.get("groups").is_none() {
+        anyhow::bail!("icon.json missing required `groups` field");
+    }
+
+    // Apple bails when any layer references a missing `image-name` or an
+    // image file that doesn't resolve in `Assets/` or the bundle root.
+    // Validate up front so we surface a clean error rather than silently
+    // emitting an empty catalog.
+    validate_layer_image_refs(icon_path, &icon_json_value)?;
+
     let source_images = find_all_source_images(icon_path, &icon_json_value);
     if source_images.is_empty() {
         return Ok(Vec::new());
@@ -347,6 +366,45 @@ fn collect_layer_assets(
         });
     }
     out
+}
+
+/// Apple's actool errors when a layer has no `image-name` or references an
+/// image that doesn't exist in `Assets/` or the bundle root. Mirror that
+/// behaviour with explicit messages instead of silently dropping layers
+/// (which is what `find_all_source_images` does).
+fn validate_layer_image_refs(bundle: &Path, json: &serde_json::Value) -> Result<()> {
+    let groups = match json.get("groups").and_then(|v| v.as_array()) {
+        Some(g) => g,
+        None => return Ok(()),
+    };
+    for group in groups {
+        let Some(layers) = group.get("layers").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for layer in layers {
+            let layer_name = layer
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unnamed)");
+            let image_name = match layer.get("image-name").and_then(|v| v.as_str()) {
+                Some(n) => n,
+                None => {
+                    anyhow::bail!(
+                        "the layer \"{layer_name}\" does not have an image name"
+                    );
+                }
+            };
+            let in_assets = bundle.join("Assets").join(image_name);
+            let in_root = bundle.join(image_name);
+            if !in_assets.exists() && !in_root.exists() {
+                anyhow::bail!(
+                    "the layer \"{layer_name}\" references an image named \
+                     \"{image_name}\" that does not exist"
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn find_all_source_images(bundle: &Path, json: &serde_json::Value) -> Vec<PathBuf> {
