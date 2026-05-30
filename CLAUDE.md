@@ -333,5 +333,10 @@ Exact reference atlas layouts for the canonical phone+ipad+marketing fixture (ma
 - scale2 pad-A 324×170: 167@(2,2) 152@(171,2)   ·   scale2 pad-B 144×126: 80@(2,2) 58@(84,2) 40@(2,84)
 - scale3 phone-A 306×272: 180@(2,2) 120@(184,2) 87@(2,184)   ·   scale3 phone-B 64×64: 60@(2,2)
 
-Cracking this needs a larger controlled sample sweep to reverse the split/sizing heuristic; do NOT retune the shared `pack_images_split` for it (that would break imageset parity) — give icons their own packer.
+**Sweep done — algorithm not derivable (dropped).** A 59-config controlled sweep across iphone@2x/@3x and ipad@1x/@2x (harness: `tools/sweep_atlas_geometry.py`, data: `tools/atlas_sweep_dataset.json`) failed to reverse the rule. Every placement hypothesis contradicts some sample:
+- *Not* shortest-column-first nor leftmost-first: in `[76,40,29,20]` the 3rd image (29) goes under col1 (the shorter column) but the 4th (20) goes under col0 (the taller) — opposite tie-breaks.
+- A scale-dependent close (`H ≥ ~85×scale`: scale2≈170, scale3≈255) fits the *new-shelf* cases (`[40,58,80,152]` H=156 adds a row → ok; `[40,58,80,167]` H=171 → splits) but **not** the column-fill cases.
+- Fatal: `[180,120,87,60]` (iphone@3x) splits the 60 into its own atlas even though it fits geometrically as a new column at (91,184) in row 1 — exactly mirroring how `[120,80,58,40]` legally places 40 at (62,124). No max-dimension, max-area, aspect-ratio, or scale-cap rule explains the split here while allowing the scale-2 column fills.
+
+Conclusion: this is a specific CUI bin-packer with internal tie-breaks/close logic not inferable from black-box output. It is **functionally irrelevant** (validate_car OK), so it's intentionally left unmatched. Do NOT retune the shared `pack_images_split` (breaks imageset parity); a future attempt would need a dedicated icon packer and likely many more samples or the CoreUI source.
 - **Atlas geometry**: our shelf packer's atlas widths/contents differ from Apple's (e.g. atlas name `…-2.0.0-…` vs Apple's `…-2.1.0-…`), so packed bytes aren't identical. (dim1 itself now resets per (scale, idiom) — `dim1_by_scale` is keyed by `(scale, idiom)` — so the atlas-key dim1 values match Apple even though the geometry doesn't.)
