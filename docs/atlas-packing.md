@@ -65,3 +65,90 @@ PackedAsset renditions use dim1 to identify the atlas group:
 - dim1=2: GA8 group
 
 dim1 increments sequentially across all format groups.
+
+---
+
+## iOS app-icon atlas packing (`--platform iphoneos`)
+
+iOS app icons pack into `ZZZZPackedAsset-*-gamut0` atlases like the macOS
+sprite path, but with idiom-specific behavior. Implemented in
+`packer::group_for_packing`, `compiler.rs`, and `car::make_inlk_tlv`.
+
+### Grouping
+
+- App icons all share the **icon facet identifier**, so the usual "≥2 distinct
+  identifiers" rule would leave every icon inline. Instead an iOS icon group
+  packs when it holds **≥2 distinct sizes (dim2)**.
+- The pack group key includes **idiom**, so Apple's **per-idiom atlases** are
+  reproduced (phone / pad / marketing never share an atlas). Idiom is 0 on
+  macOS, leaving that grouping unchanged.
+- The synthesized subtype-1792 Plus-phone icon is forced **inline**
+  (`subtype != 0 → inline`).
+
+### Idiom must thread through packing (silent-failure gotcha)
+
+`PackedImage.idiom` feeds the **atlas key**, the **packed-ref key**, *and* the
+**INLK link attribute 15**. The INLK link names the atlas by its key
+attributes; on iOS the atlas key carries idiom (attr 15), so the link must too.
+If the INLK omits the idiom attr, CUICatalog cannot resolve a packed image to
+its idiom-keyed atlas and `imagesWithName:` silently returns empty even though
+every key looks correct. The reference INLK attr stream for a phone atlas is
+`[0, (1,9)element, (2,181)part, (12,scale), (15,idiom), 0]`.
+
+### dim1
+
+`dim1` (atlas index) is counted **per (scale, idiom)** — `dim1_by_scale` is
+keyed by `(scale, idiom)`. Apple resets it to 0 for the first atlas of each
+idiom at a scale, so e.g. scale-2 phone dim1=0, scale-2 pad dim1=0,1. The
+`dim1(8)` key column appears when a scale has >1 atlas (the 2nd gets dim1=1).
+
+### Atlas naming
+
+For **imagesets** the name middle field is the dim1 (`ZZZZPackedAsset-{scale}.0.0-gamut0`
+for the first atlas) and our output matches Apple. For **app icons** Apple uses
+a constant middle of **1** (`ZZZZPackedAsset-{scale}.1.0-gamut0`), decoupled
+from the key's dim1 (which is 0/1). We do not yet reproduce this — see below.
+
+## iOS app-icon atlas *geometry* — NOT matched (dropped)
+
+The atlas's internal pixel layout (which icons land in which atlas, at what
+x,y, and the resulting dimensions) does **not** byte-match Apple. This is the
+only remaining iOS app-icon parity gap and it is **functionally irrelevant**:
+CUICatalog reads packed icons via the exact INLK (x,y,w,h) coordinates we
+emit, so a different arrangement still resolves (`validate_car` OK). Every
+non-atlas rendition, key, multisize and the subtype-1792 synthesis match.
+
+Apple's icon packer is a **shelf+column 2D bin-packer** (margin 2, gap 2,
+descending size sort — same *structure* as `packer::pack_shelf_atlas`), but a
+59-config controlled sweep (harness `tools/sweep_atlas_geometry.py`, data
+`tools/atlas_sweep_dataset.json`, across iphone@2x/@3x and ipad@1x/@2x) could
+not reverse its max-dimension / atlas-split heuristics. Every hypothesis is
+contradicted by some sample:
+
+- **Variable max width**: an iPad atlas reaches **324** wide (`[167,152]`)
+  while a phone atlas caps at **306** (`[180,120]` then wraps).
+- **Tie-breaks aren't fixed**: in `[76,40,29,20]` the 3rd image (29) stacks
+  under the *shorter* column but the 4th (20) stacks under the *taller* one —
+  so neither shortest-column-first nor leftmost-first holds.
+- **A scale-dependent close** (`H ≥ ~85×scale`: scale2≈170, scale3≈255) fits
+  the *new-shelf* cases (`[40,58,80,152]` H=156 adds a row → ok;
+  `[40,58,80,167]` H=171 → splits) but **not** the column-fill cases.
+- **Fatal**: `[180,120,87,60]` (iphone@3x) splits the 60 into its own atlas
+  even though it fits geometrically as a new column at (91,184) in row 1 —
+  exactly mirroring how `[120,80,58,40]` legally places 40 at (62,124). No
+  max-dimension, max-area, aspect-ratio, 2-row, dim2-threshold, or home-screen
+  rule explains the split here while allowing the scale-2 column fills.
+
+Exact reference atlas layouts for the canonical phone+ipad+marketing fixture
+(margin 2, gap 2), as `WxH @ (x,y)`:
+
+- scale1 pad 122×102: 76@(2,2) 40@(80,2) 20@(2,80) 29@(80,44)
+- scale2 phone 206×184: 120@(2,2) 80@(124,2) 58@(2,124) 40@(62,124)
+- scale2 pad-A 324×170: 167@(2,2) 152@(171,2)  ·  scale2 pad-B 144×126: 80@(2,2) 58@(84,2) 40@(2,84)
+- scale3 phone-A 306×272: 180@(2,2) 120@(184,2) 87@(2,184)  ·  scale3 phone-B 64×64: 60@(2,2)
+
+**Conclusion**: a specific CUI bin-packer with internal tie-breaks/close logic
+not inferable from black-box output. Left intentionally unmatched. Do **not**
+retune the shared `pack_images_split` (it would break imageset parity, which
+currently matches the Python reference) — a future attempt needs a dedicated
+icon packer and likely the CoreUI source.

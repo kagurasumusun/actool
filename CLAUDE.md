@@ -314,29 +314,10 @@ Implemented (`car.rs::is_idiom_platform`/`idiom_value`/`deployment_platform_name
 
 Done: the key format now byte-matches Apple's `[7,13,12,15,16,9,8,17,1,2]`.
 - **dim2(9) + dim1(8) key columns** (`car::compute_keyformat_ios` inserts 9 then 8 after Subtype — iOS order is reverse of macOS's `…8,9…`) and the **iOS size→index map** (`catalog::ios_icon_dim2` / `icon_size_index`): 20→1, 29→2, 40→3, 60→4, 76→5, 83(.5)→6, 90→7, 1024→8. dim2 fixed a real collision (same idiom+scale icons shared one key and collapsed). Multisize entries carry correct indices.
-- **Icon atlas packing**: app icons now pack into `ZZZZPackedAsset-*-gamut0` atlases. `packer::group_for_packing` packs an iOS icon group when it has ≥2 distinct sizes (dim2), since app icons share one identifier; the group key includes idiom so Apple's per-idiom atlases are reproduced. **Idiom threads through packing**: `PackedImage.idiom` → atlas key, packed-ref key, *and* the INLK link attr (15) — without the INLK idiom attr CUICatalog can't resolve the packed image to its (idiom-keyed) atlas and `imagesWithName:` returns empty. dim1(8) appears because a scale with >1 atlas gives the 2nd atlas dim1=1.
+- **Icon atlas packing**: app icons pack into `ZZZZPackedAsset-*-gamut0` atlases (per-idiom; idiom threads through to the INLK link). dim1(8) appears when a scale has >1 atlas. See `docs/atlas-packing.md` for the packing rules and gotchas.
 
 Done: **per-idiom MultiSized renditions** (`catalog::parse_appiconset` groups icon sizes by idiom and emits one MultiSized rendition per idiom, setting `idiom` on each so the key carries attr 15). MSIS entries are plain (w,h,index) triples — the idiom lives in the rendition key, not the entries. We now match phone `{20:1,29:2,40:3,60:4}`, pad `{20:1,29:2,40:3,76:5,83:6}`, marketing `{1024:8}`.
 
 Done: **subtype-1792 Plus-phone synthesis** (`catalog::parse_appiconset`). When a 60pt@3x iPhone icon is present, actool synthesizes a 90pt@2x icon (subtype 1792) reusing that 180px source, plus a dedicated phone/subtype-1792 multisize `{90:7}`. We clone the 60pt@3x rendition (scale→2, subtype→1792, dim2→7), and the multisize grouping keys by (idiom, subtype). The synthesized leaf is forced inline (`packer`: subtype≠0 → inline). Rendition count now matches the reference exactly (29=29); matched 23/29.
 
-Remaining — **atlas geometry only** (the CAR loads; every non-atlas rendition, key, multisize and the subtype-1792 synthesis match the reference). This is the last gap to full byte-parity and it is *functionally irrelevant*: CUICatalog reads packed icons via the exact INLK (x,y,w,h) coordinates, so a different atlas arrangement still resolves correctly (validate_car OK).
-
-Apple's icon packer is a **shelf+column 2D bin-packer** (margin=2, gap=2, descending size sort — same *structure* as `packer::pack_shelf_atlas`), but its max-dimension and atlas-split heuristics are **not derivable** from the samples collected and resist a clean rule:
-- Variable max width: an iPad atlas reaches **324** wide (`[167,152]`) while a phone atlas caps at **306** (`[180,120]` then wraps).
-- Non-geometric splits: `four_3x = [180,120,87,60]` → `[180,120,87]` + a separate `[60]` atlas, even though the 60px icon fits geometrically in the first atlas. No fixed max-dimension, max-area, aspect-ratio, 2-row, dim2-threshold, or home-screen rule fits all cases.
-- Atlas name middle field is a constant **1** for app-icon atlases (`ZZZZPackedAsset-{scale}.1.0-gamut0`) — decoupled from the key's dim1 (which is 0/1). For imagesets the middle is the dim1 (`…-{scale}.0.0-…`), and our imageset packing matches Apple (Python-ref parity tests).
-
-Exact reference atlas layouts for the canonical phone+ipad+marketing fixture (margin 2, gap 2), as `WxH @ (x,y)`:
-- scale1 pad 122×102: 76@(2,2) 40@(80,2) 20@(2,80) 29@(80,44)
-- scale2 phone 206×184: 120@(2,2) 80@(124,2) 58@(2,124) 40@(62,124)
-- scale2 pad-A 324×170: 167@(2,2) 152@(171,2)   ·   scale2 pad-B 144×126: 80@(2,2) 58@(84,2) 40@(2,84)
-- scale3 phone-A 306×272: 180@(2,2) 120@(184,2) 87@(2,184)   ·   scale3 phone-B 64×64: 60@(2,2)
-
-**Sweep done — algorithm not derivable (dropped).** A 59-config controlled sweep across iphone@2x/@3x and ipad@1x/@2x (harness: `tools/sweep_atlas_geometry.py`, data: `tools/atlas_sweep_dataset.json`) failed to reverse the rule. Every placement hypothesis contradicts some sample:
-- *Not* shortest-column-first nor leftmost-first: in `[76,40,29,20]` the 3rd image (29) goes under col1 (the shorter column) but the 4th (20) goes under col0 (the taller) — opposite tie-breaks.
-- A scale-dependent close (`H ≥ ~85×scale`: scale2≈170, scale3≈255) fits the *new-shelf* cases (`[40,58,80,152]` H=156 adds a row → ok; `[40,58,80,167]` H=171 → splits) but **not** the column-fill cases.
-- Fatal: `[180,120,87,60]` (iphone@3x) splits the 60 into its own atlas even though it fits geometrically as a new column at (91,184) in row 1 — exactly mirroring how `[120,80,58,40]` legally places 40 at (62,124). No max-dimension, max-area, aspect-ratio, or scale-cap rule explains the split here while allowing the scale-2 column fills.
-
-Conclusion: this is a specific CUI bin-packer with internal tie-breaks/close logic not inferable from black-box output. It is **functionally irrelevant** (validate_car OK), so it's intentionally left unmatched. Do NOT retune the shared `pack_images_split` (breaks imageset parity); a future attempt would need a dedicated icon packer and likely many more samples or the CoreUI source.
-- **Atlas geometry**: our shelf packer's atlas widths/contents differ from Apple's (e.g. atlas name `…-2.0.0-…` vs Apple's `…-2.1.0-…`), so packed bytes aren't identical. (dim1 itself now resets per (scale, idiom) — `dim1_by_scale` is keyed by `(scale, idiom)` — so the atlas-key dim1 values match Apple even though the geometry doesn't.)
+Remaining — **atlas geometry only** (the CAR loads; every non-atlas rendition, key, multisize and the subtype-1792 synthesis match the reference). Functionally irrelevant (CUICatalog uses the exact INLK coordinates) and intentionally left unmatched — Apple's icon bin-packer wasn't reverse-engineerable from a 59-config sweep. Full analysis, reference layouts and the dropped-sweep dead-ends are in `docs/atlas-packing.md`.
