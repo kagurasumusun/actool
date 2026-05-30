@@ -12,11 +12,32 @@ use std::io::Write;
 pub const KEYFORMAT_ALL: &[u16] = &[7, 13, 1, 2, 3, 4, 17, 8, 9, 11, 12, 24];
 pub const KEYFORMAT_OPTIONAL: &[u16] = &[4, 8, 9];
 
-// iOS/tvOS catalogs use a fixed key format that carries Idiom (attr 15) and
-// Subtype (attr 16) and omits the macOS-only Size/Layer columns. Verified
-// against `/usr/bin/actool --platform iphoneos`: the same eight columns are
-// emitted regardless of which idioms the renditions actually use.
+// iOS/tvOS catalogs carry Idiom (attr 15) and Subtype (attr 16) and omit the
+// macOS-only Size/Layer columns. The base eight columns are emitted regardless
+// of which idioms the renditions use; app icons additionally insert Dimension2
+// then Dimension1 between Subtype and Identifier (see `compute_keyformat_ios`).
 pub const KEYFORMAT_IOS: &[u16] = &[7, 13, 12, 15, 16, 17, 1, 2];
+
+/// iOS key format with the Dimension2 (9) / Dimension1 (8) columns inserted
+/// after Subtype when the renditions use them — app-icon size indices and
+/// sprite-atlas counters respectively. Note the iOS order is 9 *then* 8, the
+/// reverse of `KEYFORMAT_ALL`'s macOS `…8,9…`.
+pub fn compute_keyformat_ios<R>(renditions: &[R], force_dim1: bool) -> Vec<u16>
+where
+    R: KeyformatRendition,
+{
+    let used_dim1 = force_dim1 || renditions.iter().any(|r| r.dim1() != 0);
+    let used_dim2 = renditions.iter().any(|r| r.dim2() != 0);
+    let mut kf = vec![7, 13, 12, 15, 16];
+    if used_dim2 {
+        kf.push(9);
+    }
+    if used_dim1 {
+        kf.push(8);
+    }
+    kf.extend_from_slice(&[17, 1, 2]);
+    kf
+}
 
 /// True for the device-family platforms whose catalogs encode idiom in the
 /// rendition key (iOS and its simulator). macOS keeps the legacy layout.

@@ -303,3 +303,54 @@ fn ios_appicon_renditions_carry_device_idiom() {
     assert!(seen.contains(&1), "expected a phone (1) icon rendition");
     assert!(seen.contains(&6), "expected a marketing (6) icon rendition");
 }
+
+#[test]
+fn ios_appicon_keyformat_adds_dim2_and_renditions_dont_collide() {
+    let root = workspace_tmp("ios_appicon_keyformat");
+    // Five iPhone @2x sizes that share idiom+scale and previously collided on a
+    // single key when Dimension2 was absent.
+    build_appicon_catalog(
+        &root,
+        &[
+            ("20x20", "2x", "iphone"),
+            ("29x29", "2x", "iphone"),
+            ("40x40", "2x", "iphone"),
+            ("60x60", "2x", "iphone"),
+            ("60x60", "3x", "iphone"),
+        ],
+    );
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    compile_ios_icon(&root.join("A.xcassets"), &out);
+
+    let car = std::fs::read(out.join("Assets.car")).expect("car");
+    let kf = keyformat(&car);
+
+    // App-icon key format carries Dimension2 (9) after Subtype; an imageset
+    // (no icons) does not — see ios_imageset_emits_idiom_keyformat_and_header.
+    assert!(kf.contains(&9), "app-icon keyformat must include dim2 (9)");
+    let sub = kf.iter().position(|t| *t == 16).unwrap();
+    let d2 = kf.iter().position(|t| *t == 9).unwrap();
+    assert!(d2 == sub + 1, "dim2 must follow subtype");
+
+    // The four distinct @2x point sizes must produce distinct Dimension2 values
+    // (1,2,3,4) in their rendition keys — i.e. no collision.
+    let d2_col = d2;
+    let scale_col = kf.iter().position(|t| *t == 12).unwrap();
+    let idiom_col = kf.iter().position(|t| *t == 15).unwrap();
+    let mut d2_at_scale2 = std::collections::HashSet::new();
+    for i in (0..car.len().saturating_sub(kf.len() * 2)).step_by(2) {
+        let cols: Vec<u16> = (0..kf.len())
+            .map(|c| u16::from_le_bytes(car[i + c * 2..i + c * 2 + 2].try_into().unwrap()))
+            .collect();
+        if cols[0] == 0 && cols[1] == 0 && cols[scale_col] == 2 && cols[idiom_col] == 1 {
+            d2_at_scale2.insert(cols[d2_col]);
+        }
+    }
+    for idx in [1u16, 2, 3, 4] {
+        assert!(
+            d2_at_scale2.contains(&idx),
+            "expected distinct phone@2x dim2={idx}"
+        );
+    }
+}

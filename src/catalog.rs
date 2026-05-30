@@ -29,6 +29,24 @@ fn icon_dim2(point_w: u32) -> u16 {
         .unwrap_or(0)
 }
 
+/// iOS app-icon size index (rendition key Dimension2). Maps the point size to
+/// the slot CoreUI uses to distinguish icon sizes within an idiom; 90 is the
+/// synthesized Plus/Max size. Verified against `/usr/bin/actool`. Without this
+/// every same-scale icon would share a rendition key and collapse to one.
+fn ios_icon_dim2(point_w: u32) -> u16 {
+    match point_w {
+        20 => 1,
+        29 => 2,
+        40 => 3,
+        60 => 4,
+        76 => 5,
+        83 => 6,
+        90 => 7,
+        1024 => 8,
+        _ => 0,
+    }
+}
+
 fn premultiply_bgra(mut buf: Vec<u8>) -> Vec<u8> {
     for chunk in buf.chunks_exact_mut(4) {
         let a = chunk[3];
@@ -755,15 +773,16 @@ impl AssetCatalog {
             let lower_filename = filename.to_ascii_lowercase();
             let scale = parse_scale(img_info);
             let size_str = img_info.get("size").and_then(|v| v.as_str()).unwrap_or("");
-            let point_w: u32 = if let Some((w, _)) = size_str.split_once('x') {
-                w.parse().unwrap_or(0)
-            } else {
-                0
-            };
+            // Floor handles fractional iPad sizes ("83.5x83.5" -> 83).
+            let point_w: u32 = size_str
+                .split_once('x')
+                .and_then(|(w, _)| w.parse::<f64>().ok())
+                .map(|f| f.floor() as u32)
+                .unwrap_or(0);
 
             if lower_filename.ends_with(".svg") {
                 let svg_data = fs::read(&img_path)?;
-                let dim2 = icon_dim2(point_w);
+                let dim2 = self.icon_size_index(point_w);
                 let csi = car::build_svg_csi(filename, &svg_data);
                 let mut vec_rend = Rendition {
                     name: filename.to_string(),
@@ -829,7 +848,7 @@ impl AssetCatalog {
             let (pixel_data, width, height, pixel_format) =
                 load_image_as_bgra(&img_path, self.force_bgra)?;
             let pixel_size = point_w * scale;
-            let dim2 = icon_dim2(point_w);
+            let dim2 = self.icon_size_index(point_w);
             renditions.push(Rendition {
                 name: filename.to_string(),
                 identifier: ident,
@@ -863,7 +882,7 @@ impl AssetCatalog {
                 ms_entries.push(MultisizeImageEntry {
                     width: *point_w,
                     height: *point_w,
-                    index: icon_dim2(*point_w) as u32,
+                    index: self.icon_size_index(*point_w) as u32,
                 });
             }
         }
@@ -1271,6 +1290,17 @@ impl AssetCatalog {
             }
         }
         Ok(())
+    }
+
+    /// App-icon size index (rendition key Dimension2), using the platform's
+    /// size table. iOS sizes differ from macOS, and an incorrect index makes
+    /// same-scale icons collide on a shared key.
+    fn icon_size_index(&self, point_w: u32) -> u16 {
+        if car::is_idiom_platform(&self.platform) {
+            ios_icon_dim2(point_w)
+        } else {
+            icon_dim2(point_w)
+        }
     }
 
     /// App-icon images with their idiom and point size preserved, for the iOS

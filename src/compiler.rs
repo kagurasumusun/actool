@@ -80,10 +80,10 @@ pub fn compile_catalog(
         trial_atlas_count += packer::pack_images_split(imgs, 262, 196).len();
     }
     let uses_dim1 = trial_atlas_count > trial_scales.len();
-    // iOS catalogs use a fixed idiom-carrying key format; macOS trims its key
-    // columns to the attributes actually used.
+    // iOS catalogs use an idiom-carrying key format (with dim2/dim1 added for
+    // app icons); macOS trims its key columns to the attributes actually used.
     let keyformat = if car::is_idiom_platform(platform) {
-        car::KEYFORMAT_IOS.to_vec()
+        car::compute_keyformat_ios(&renditions, uses_dim1)
     } else {
         car::compute_keyformat(&renditions, uses_dim1)
     };
