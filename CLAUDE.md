@@ -300,5 +300,5 @@ These are all *silent* — the catalog loads, but `imagesWithName:` returns empt
 
 Other surprising behaviors:
 - Apple emits the **same** `.car` at every `--minimum-deployment-target` from 11.0–26.0 — only the `deploymentPlatformVersion` string in EXTENDED_METADATA changes. No version-specific output paths.
-- For `.icon` bundles Apple **never** writes `.icns` and **always** writes an empty `<dict/>` plist (181 bytes), regardless of `--standalone-icon-behavior`. The legacy xcassets path (`compiler.rs`) still emits both.
+- For `.icon` bundles Apple emits `<app-icon>.icns` **and** a populated partial plist (`CFBundleIconFile` + `CFBundleIconName`) iff the bundle's filename stem matches `--app-icon` case-sensitively. Stem mismatch → only `Assets.car` + an empty `<dict/>` plist (181 bytes). Neither `supported-platforms` nor `--standalone-icon-behavior` affects this gate (verified on `Icon.icon` vs `lc_icon.icon` and against `--standalone-icon-behavior none`). The legacy xcassets path (`compiler.rs`) still emits both.
 - BOM named-block emission order: `CARHEADER, RENDITIONS, FACETKEYS, APPEARANCEKEYS, KEYFORMAT, EXTENDED_METADATA, BITMAPKEYS` (RENDITIONS early, KEYFORMAT late) — not load-blocking on its own but reduces the diff.
