@@ -30,6 +30,9 @@ pub struct PackedImage {
     pub dim2: u32,
     pub appearance: u32,
     pub direction: u32,
+    /// Device idiom (key attribute 15). Preserved through packing so iOS
+    /// app-icon atlas and packed-ref keys stay idiom-correct; 0 elsewhere.
+    pub idiom: u32,
     /// True when the source was a vector (SVG / PDF) rasterized into
     /// pixels. CoreUI sets a CSI flag bit (0x04) for these so the runtime
     /// knows the rendition originated from a vector mask.
@@ -57,6 +60,7 @@ impl PackedImage {
             dim2: 0,
             appearance: 0,
             direction: 0,
+            idiom: 0,
             is_svg_rasterization: false,
             variant: 0,
         }
@@ -310,8 +314,10 @@ pub fn group_for_packing(
     const PACK_MAX_HEIGHT: u32 = 196;
     const PACK_MARGIN: u32 = 4;
 
-    // group key: (pixel_format, scale, sprite_atlas_id) -> list of indices
-    let mut groups: indexmap::IndexMap<([u8; 4], u16, u16), Vec<usize>> =
+    // group key: (pixel_format, scale, sprite_atlas_id, idiom) -> indices.
+    // Idiom is part of the key so iOS atlases never mix idioms (Apple emits a
+    // separate atlas per idiom); it's 0 on macOS, leaving that grouping intact.
+    let mut groups: indexmap::IndexMap<([u8; 4], u16, u16, u16), Vec<usize>> =
         indexmap::IndexMap::new();
     let mut force_inline: Vec<usize> = Vec::new();
 
@@ -340,7 +346,7 @@ pub fn group_for_packing(
             force_inline.push(i);
             continue;
         }
-        let key = (rend.pixel_format, rend.scale, rend.sprite_atlas_id);
+        let key = (rend.pixel_format, rend.scale, rend.sprite_atlas_id, rend.idiom);
         groups.entry(key).or_default().push(i);
     }
 
@@ -349,12 +355,31 @@ pub fn group_for_packing(
 
     // Sort keys deterministically to match Python's sorted()
     let mut keys: Vec<_> = groups.keys().cloned().collect();
-    keys.sort_by_key(|k| (k.0, k.1, k.2));
+    keys.sort_by_key(|k| (k.0, k.1, k.2, k.3));
     for k in keys {
         let idxs = groups.shift_remove(&k).unwrap();
-        let distinct: std::collections::HashSet<u16> =
-            idxs.iter().map(|i| renditions[*i].identifier).collect();
-        if distinct.len() >= 2 {
+        // A group packs when it holds ≥2 distinct assets. Imagesets are
+        // distinct by identifier (one per imageset). iOS app icons all share
+        // the icon facet's identifier, so they're distinct by size (dim2)
+        // instead — without this every per-size icon stays inline and never
+        // gets the dim1 atlas column. Gated to iOS to leave macOS output
+        // (covered by stored-reference parity tests) untouched.
+        let ios_icon_group = idxs.iter().all(|i| {
+            let r = &renditions[*i];
+            r.part == car::PART_ICON && car::is_idiom_platform(&r.platform)
+        });
+        let distinct = if ios_icon_group {
+            idxs.iter()
+                .map(|i| (renditions[*i].identifier, renditions[*i].dim2))
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+        } else {
+            idxs.iter()
+                .map(|i| renditions[*i].identifier)
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+        };
+        if distinct >= 2 {
             pack_groups.push((k.0, k.1, idxs));
         } else {
             inline.extend(idxs);

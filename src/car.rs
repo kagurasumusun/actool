@@ -703,6 +703,7 @@ pub fn make_inlk_tlv(
     scale: u16,
     atlas_identifier: u16,
     atlas_dim1: u16,
+    idiom: u16,
 ) -> Vec<u8> {
     let mut inlk = Vec::new();
     inlk.extend_from_slice(b"KLNI");
@@ -728,6 +729,12 @@ pub fn make_inlk_tlv(
     }
     attr.write_u16::<LittleEndian>(12).unwrap();
     attr.write_u16::<LittleEndian>(scale).unwrap();
+    // iOS atlases are keyed per idiom; the link must name the atlas idiom
+    // (attr 15) or CUICatalog can't resolve the packed image to its atlas.
+    if idiom != 0 {
+        attr.write_u16::<LittleEndian>(15).unwrap();
+        attr.write_u16::<LittleEndian>(idiom).unwrap();
+    }
     attr.write_u16::<LittleEndian>(0).unwrap();
 
     inlk.write_u16::<LittleEndian>(12).unwrap();
@@ -750,12 +757,22 @@ pub fn build_packed_image_csi(
     atlas_identifier: u16,
     atlas_dim1: u16,
     rendition_flags: u32,
+    idiom: u16,
 ) -> Vec<u8> {
     let scale_factor = scale as u32 * 100;
     let mut tlv = Vec::new();
     tlv.extend(make_slices_tlv(width, height));
     tlv.extend(make_metrics_tlv(width, height));
-    tlv.extend(make_inlk_tlv(x, y, width, height, scale, atlas_identifier, atlas_dim1));
+    tlv.extend(make_inlk_tlv(
+        x,
+        y,
+        width,
+        height,
+        scale,
+        atlas_identifier,
+        atlas_dim1,
+        idiom,
+    ));
     tlv.extend(make_blend_opacity_tlv());
     tlv.extend(make_exif_orientation_tlv(1));
 

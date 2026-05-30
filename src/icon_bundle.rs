@@ -638,6 +638,7 @@ fn build_icon_car(
                     0,
                     0,
                     0,
+                    0,
                 );
                 renditions.push(Rendition {
                     name: img.name.clone(),

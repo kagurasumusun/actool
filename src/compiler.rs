@@ -74,6 +74,7 @@ pub fn compile_catalog(
                 pi.scale = r.scale as u32;
                 pi.part = r.part as u32;
                 pi.dim2 = r.dim2 as u32;
+                pi.idiom = r.idiom as u32;
                 pi
             })
             .collect();
@@ -138,6 +139,7 @@ pub fn compile_catalog(
                     dim2: r.dim2 as u32,
                     appearance: r.appearance as u32,
                     direction: r.direction as u32,
+                    idiom: r.idiom as u32,
                     is_svg_rasterization: r.is_svg_rasterization,
                     variant: r.variant as u32,
                 }
@@ -159,6 +161,7 @@ pub fn compile_catalog(
                 atlas.name()
             };
 
+            let atlas_idiom = atlas.images.first().map(|i| i.idiom as u16).unwrap_or(0);
             let atlas_key = car::make_rendition_key(
                 RenditionKeyParts {
                     element: car::ELEMENT_PACKED,
@@ -166,6 +169,7 @@ pub fn compile_catalog(
                     identifier: sprite_atlas_id,
                     dim1: dim1_counter,
                     scale: *scale,
+                    idiom: atlas_idiom,
                     ..Default::default()
                 },
                 &keyformat,
@@ -194,6 +198,7 @@ pub fn compile_catalog(
                         appearance: img.appearance as u16,
                         direction: img.direction as u16,
                         scale: *scale,
+                        idiom: img.idiom as u16,
                         ..Default::default()
                     },
                     &keyformat,
@@ -216,6 +221,7 @@ pub fn compile_catalog(
                         }
                         f
                     },
+                    img.idiom as u16,
                 );
                 all_entries.push((ref_key, ref_csi));
             }

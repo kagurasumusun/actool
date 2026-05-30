@@ -354,3 +354,49 @@ fn ios_appicon_keyformat_adds_dim2_and_renditions_dont_collide() {
         );
     }
 }
+
+#[test]
+fn ios_appicon_packs_into_atlases_with_dim1_and_keeps_idiom() {
+    let root = workspace_tmp("ios_appicon_packing");
+    build_appicon_catalog(
+        &root,
+        &[
+            ("20x20", "2x", "iphone"),
+            ("20x20", "3x", "iphone"),
+            ("29x29", "2x", "iphone"),
+            ("29x29", "3x", "iphone"),
+            ("40x40", "2x", "iphone"),
+            ("40x40", "3x", "iphone"),
+            ("60x60", "2x", "iphone"),
+            ("60x60", "3x", "iphone"),
+            ("1024x1024", "1x", "ios-marketing"),
+        ],
+    );
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    compile_ios_icon(&root.join("A.xcassets"), &out);
+
+    let car = std::fs::read(out.join("Assets.car")).expect("car");
+    let kf = keyformat(&car);
+
+    // Packing multiple atlases per scale introduces Dimension1 (8); together
+    // with Dimension2 (9) the app-icon key format matches host actool.
+    assert!(kf.contains(&9), "keyformat must carry dim2");
+    assert!(kf.contains(&8), "keyformat must carry dim1 once icons pack");
+
+    // A packed atlas rendition (element = PACKED) must exist and carry the
+    // phone idiom — packing must not drop the idiom (it keys the atlas).
+    let el = kf.iter().position(|t| *t == 1).unwrap();
+    let idiom_col = kf.iter().position(|t| *t == 15).unwrap();
+    let mut packed_phone = false;
+    for i in (0..car.len().saturating_sub(kf.len() * 2)).step_by(2) {
+        let cols: Vec<u16> = (0..kf.len())
+            .map(|c| u16::from_le_bytes(car[i + c * 2..i + c * 2 + 2].try_into().unwrap()))
+            .collect();
+        // ELEMENT_PACKED == 9; phone idiom == 1.
+        if cols[el] == 9 && cols[idiom_col] == 1 && cols[0] == 0 && cols[1] == 0 {
+            packed_phone = true;
+        }
+    }
+    assert!(packed_phone, "expected a phone-idiom packed atlas key");
+}
