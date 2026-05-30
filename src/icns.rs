@@ -5,7 +5,7 @@
 //! `ic04` as a PackBits-compressed ARGB entry.
 
 use byteorder::{BigEndian, WriteBytesExt};
-use image::{imageops::FilterType, GenericImageView};
+use image::imageops::FilterType;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -120,11 +120,23 @@ fn make_exif(width: u32, height: u32) -> Vec<u8> {
     buf
 }
 
-fn reencode_png(img_path: &Path) -> anyhow::Result<Vec<u8>> {
-    let img = image::open(img_path)?;
-    let (w, h) = img.dimensions();
-    let rgba = img.to_rgba8();
-    let exif = make_exif(w, h);
+fn reencode_png_at_size(img_path: &Path, pixel_size: u32) -> anyhow::Result<Vec<u8>> {
+    let img = image::open(img_path)?.to_rgba8();
+    let resized = if img.width() != pixel_size || img.height() != pixel_size {
+        image::imageops::resize(&img, pixel_size, pixel_size, FilterType::Lanczos3)
+    } else {
+        img
+    };
+    let exif = make_exif(pixel_size, pixel_size);
+    encode_rgba_png(&resized, pixel_size, pixel_size, &exif)
+}
+
+fn encode_rgba_png(
+    rgba: &image::ImageBuffer<image::Rgba<u8>, Vec<u8>>,
+    w: u32,
+    h: u32,
+    exif: &[u8],
+) -> anyhow::Result<Vec<u8>> {
 
     let mut out = Vec::new();
     {
@@ -134,7 +146,7 @@ fn reencode_png(img_path: &Path) -> anyhow::Result<Vec<u8>> {
         encoder.set_compression(png::Compression::Fast);
         encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
         let mut writer = encoder.write_header()?;
-        writer.write_chunk(png::chunk::ChunkType(*b"eXIf"), &exif)?;
+        writer.write_chunk(png::chunk::ChunkType(*b"eXIf"), exif)?;
         writer.write_image_data(rgba.as_raw())?;
     }
     Ok(out)
@@ -144,22 +156,27 @@ pub fn create_icns<P: AsRef<Path>>(
     icon_images: &[(PathBuf, u32, u32)],
     output_path: P,
 ) -> anyhow::Result<()> {
-    // (point_size, scale) -> image path
-    let mut lookup: std::collections::HashMap<(u32, u32), &PathBuf> =
+    // (point_size, scale) -> image path; also track best source per point
+    // size so we can synthesize ic04/ic07 (scale 1) from a @2x source when
+    // the bundle only ships @2x sized renditions.
+    let mut exact: std::collections::HashMap<(u32, u32), &PathBuf> =
+        std::collections::HashMap::new();
+    let mut by_point: std::collections::HashMap<u32, &PathBuf> =
         std::collections::HashMap::new();
     for (path, pixel_size, scale) in icon_images {
         let point = pixel_size / scale;
-        lookup.insert((point, *scale), path);
+        exact.insert((point, *scale), path);
+        by_point.entry(point).or_insert(path);
     }
 
     let mut entries: Vec<([u8; 4], Vec<u8>)> = Vec::new();
     for (point, scale, type_code, fmt) in ENTRIES {
-        let Some(path) = lookup.get(&(*point, *scale)) else {
-            continue;
-        };
+        let path_opt = exact.get(&(*point, *scale)).or_else(|| by_point.get(point));
+        let Some(path) = path_opt else { continue };
+        let pixel_size = point * scale;
         let data = match *fmt {
-            "argb" => make_argb(path, point * scale)?,
-            _ => reencode_png(path)?,
+            "argb" => make_argb(path, pixel_size)?,
+            _ => reencode_png_at_size(path, pixel_size)?,
         };
         entries.push((**type_code, data));
     }

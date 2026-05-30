@@ -320,11 +320,10 @@ fn synthetic_png_automatic_fill_produces_iconcomposer_catalog() {
     fs::create_dir_all(&out).unwrap();
     let files = compile(&bundle, "Synth", &out);
 
-    // Files emitted: Assets.car + info.plist; no icns because squares is
-    // an explicit modern list.
+    // Bundle stem "Synth" matches --app-icon "Synth" → icns emitted.
     assert!(files.iter().any(|p| p.ends_with("Assets.car")));
-    assert!(!files.iter().any(|p| p.extension().is_some_and(|e| e == "icns")),
-        "explicit `squares: [macOS]` should not emit a standalone .icns");
+    assert!(files.iter().any(|p| p.ends_with("Synth.icns")),
+        "bundle stem matches --app-icon: standalone .icns required");
 
     let car = parse_car(&out.join("Assets.car"));
 
@@ -387,9 +386,10 @@ fn solid_srgb_fill_emits_4_colors_1_gradient_with_user_color() {
     fs::create_dir_all(&out).unwrap();
     let files = compile(&bundle, "Solid", &out);
 
-    // `squares: "shared"` means Apple emits a standalone .icns; we must too.
+    // Stem "Solid" matches --app-icon "Solid" → icns emitted regardless
+    // of supported-platforms shape.
     assert!(files.iter().any(|p| p.ends_with("Solid.icns")),
-        "shared platform requires standalone .icns");
+        "matching stem requires standalone .icns");
 
     let car = parse_car(&out.join("Assets.car"));
     let facets: std::collections::HashSet<_> = facet_names(&car).into_iter().collect();
@@ -541,27 +541,30 @@ fn svg_source_bundle_does_not_emit_legacy_pdf_only_catalog() {
 }
 
 #[test]
-fn icns_gate_matches_apple_across_supported_platforms_shapes() {
-    // Apple's icns emission rule, verified empirically across all
-    // checked-in third_party fixtures (element-web, KYA, tagspaces,
-    // ding, classhub, recipe-scraper-app, scrumdinger): icns is
-    // skipped ONLY when `squares` is an explicit list whose entries
-    // are all "macOS". Everything else — "shared", non-Mac targets in
-    // the list, an absent `supported-platforms` key — emits icns.
+fn icns_gate_matches_apple_on_bundle_stem_vs_app_icon() {
+    // Apple's true rule (verified by toggling stem + --app-icon against
+    // /usr/bin/actool): emit `<app-icon>.icns` and a populated partial
+    // plist iff the bundle's filename stem matches --app-icon
+    // case-sensitively. `supported-platforms` and
+    // `--standalone-icon-behavior` do NOT affect this gate.
     let parent = tempdir();
-    for (label, supported, expect_icns) in [
-        // The element-web shape — modern Mac-only.
-        ("mac_only", serde_json::json!({"squares": ["macOS"]}), false),
-        // The scrumdinger shape — includes iOS, so icns emitted.
-        ("multi_platform", serde_json::json!({"squares": ["iOS", "macOS"]}), true),
-        // The KYA/tagspaces/ding/classhub/recipe-scraper shape.
-        ("shared", serde_json::json!({"squares": "shared"}), true),
-        // Defensive: supported-platforms absent → emit icns.
-        ("absent", serde_json::Value::Null, true),
+    for (label, stem, app_icon, supported, expect_icns) in [
+        // Match — must emit, regardless of supported-platforms.
+        ("match_macos_only", "Match", "Match",
+            serde_json::json!({"squares": ["macOS"]}), true),
+        ("match_shared", "Match2", "Match2",
+            serde_json::json!({"squares": "shared"}), true),
+        ("match_absent", "Match3", "Match3", serde_json::Value::Null, true),
+        // Mismatch — case-sensitive comparison fails → no icns.
+        ("case_mismatch", "icon", "Icon",
+            serde_json::json!({"squares": ["macOS"]}), false),
+        // Mismatch — entirely different names.
+        ("name_mismatch", "Mismatch", "Other",
+            serde_json::json!({"squares": "shared"}), false),
     ] {
         let bundle = build_icon_bundle(
             parent.path(),
-            label,
+            stem,
             "main.png",
             |p| write_synthetic_png(p, 1024, [128, 128, 128, 255]),
             serde_json::Value::String("automatic".to_string()),
@@ -570,7 +573,7 @@ fn icns_gate_matches_apple_across_supported_platforms_shapes() {
         );
         let out = parent.path().join(format!("out_{label}"));
         fs::create_dir_all(&out).unwrap();
-        let files = compile(&bundle, label, &out);
+        let files = compile(&bundle, app_icon, &out);
         let icns_emitted = files
             .iter()
             .any(|p| p.extension().is_some_and(|e| e == "icns"));
@@ -578,5 +581,16 @@ fn icns_gate_matches_apple_across_supported_platforms_shapes() {
             icns_emitted, expect_icns,
             "{label}: icns gating mismatch (expect={expect_icns} got={icns_emitted})"
         );
+
+        let plist = fs::read_to_string(out.join("info.plist")).expect("plist");
+        if expect_icns {
+            assert!(plist.contains("CFBundleIconFile"),
+                "{label}: expected populated plist when emitting icns");
+            assert!(plist.contains(&format!("<string>{app_icon}</string>")),
+                "{label}: plist must reference the --app-icon name");
+        } else {
+            assert!(plist.contains("<dict/>"),
+                "{label}: expected empty <dict/> plist when not emitting icns");
+        }
     }
 }

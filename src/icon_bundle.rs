@@ -3,7 +3,7 @@
 use crate::bom::BomWriter;
 use crate::car::{self, MultisizeImageEntry, Rendition};
 use crate::catalog::load_image_as_bgra;
-use crate::icon_json::{Fill, IconJson, PlatformList};
+use crate::icon_json::{Fill, IconJson};
 use crate::name_hash::hash_name;
 use byteorder::LittleEndian;
 
@@ -272,10 +272,13 @@ pub fn compile_icon_bundle(
     )?;
     output_files.push(fs::canonicalize(&car_path).unwrap_or(car_path));
 
-    // Apple emits an `.icns` alongside the catalog when the .icon bundle
-    // is "shared" with legacy targets; bundles that declare an explicit
-    // modern platform list (e.g. `squares: ["macOS"]`) skip the icns.
-    if needs_standalone_icns(&parsed) && standalone_icon_behavior != "none" {
+    // Apple's empirical rule for `.icon` bundles: emit `<icon_name>.icns`
+    // and a populated partial plist (CFBundleIconFile/CFBundleIconName)
+    // iff `--app-icon` matches the bundle's filename stem case-sensitively.
+    // Verified by toggling the stem against the flag — neither
+    // `supported-platforms` nor `--standalone-icon-behavior` affects this.
+    let names_match = icon_name == bundle_stem;
+    if names_match {
         let icns_path = output_dir.join(format!("{icon_name}.icns"));
         crate::icns::create_icns(&icon_images, &icns_path)?;
         if icns_path.exists() {
@@ -285,12 +288,14 @@ pub fn compile_icon_bundle(
 
     let _ = fs::remove_dir_all(&tmpdir);
     let _ = accent_color;
+    let _ = standalone_icon_behavior;
 
-    // Apple writes an EMPTY plist (`<dict/>`) for .icon bundles; the
-    // CFBundleIconFile/CFBundleIconName fields belong to legacy icon-set
-    // workflows, not the new IconComposer format.
     if let Some(path) = info_plist_path {
-        write_empty_partial_plist(path)?;
+        if names_match {
+            write_populated_partial_plist(path, &icon_name)?;
+        } else {
+            write_empty_partial_plist(path)?;
+        }
         output_files.push(fs::canonicalize(path).unwrap_or(path.to_path_buf()));
     }
     Ok(output_files)
@@ -1265,28 +1270,6 @@ fn fill_assets(
     }
 }
 
-/// Whether Apple's actool emits a standalone `.icns` alongside the catalog.
-/// Empirically observed across all known fixtures:
-///   element-web        `squares: ["macOS"]`         → NO icns
-///   scrumdinger        `squares: ["iOS", "macOS"]`  → emits icns
-///   KYA/ts/ding/ch/rsa `squares: "shared"`          → emits icns
-///   (absent)                                        → emits icns
-///
-/// Refined rule: skip icns ONLY when squares is an explicit list whose
-/// only entry is "macOS" — i.e. a pure modern-Mac bundle. Any list that
-/// includes a non-macOS legacy target (iOS, watchOS, …), the "shared"
-/// keyword, or no constraint at all triggers icns emission.
-fn needs_standalone_icns(parsed: &IconJson) -> bool {
-    match parsed.supported_platforms.as_ref().and_then(|sp| sp.squares.as_ref()) {
-        Some(PlatformList::Explicit(list)) => {
-            // Mac-only explicit list → no icns. Any other entry forces it.
-            !list.iter().all(|p| p == "macOS")
-        }
-        Some(PlatformList::Shared(_)) => true,
-        None => true,
-    }
-}
-
 fn write_icon_car(
     car_path: &Path,
     facets: &[FacetEntry],
@@ -1437,6 +1420,31 @@ mod tests {
         assert_ne!(a, b);
         assert_ne!(b, c);
     }
+}
+
+fn write_populated_partial_plist(path: &Path, icon_name: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    let body = format!(
+        concat!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+            "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n",
+            "<plist version=\"1.0\">\n",
+            "<dict>\n",
+            "\t<key>CFBundleIconFile</key>\n",
+            "\t<string>{name}</string>\n",
+            "\t<key>CFBundleIconName</key>\n",
+            "\t<string>{name}</string>\n",
+            "</dict>\n",
+            "</plist>\n",
+        ),
+        name = icon_name,
+    );
+    fs::write(path, body)?;
+    Ok(())
 }
 
 fn write_empty_partial_plist(path: &Path) -> Result<()> {
