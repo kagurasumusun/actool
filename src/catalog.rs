@@ -739,7 +739,7 @@ impl AssetCatalog {
             .cloned()
             .unwrap_or_default();
 
-        let mut icon_renditions: Vec<(u32, u32)> = Vec::new(); // (point_w, pixel_size)
+        let mut icon_renditions: Vec<(u32, u16)> = Vec::new(); // (point_w, idiom)
         for img_info in &images {
             let Some(filename) = img_info.get("filename").and_then(|v| v.as_str()) else {
                 continue;
@@ -838,7 +838,7 @@ impl AssetCatalog {
                             platform: self.platform.clone(),
                             ..Rendition::default()
                         });
-                        icon_renditions.push((point_w, point_w * raster_scale as u32));
+                        icon_renditions.push((point_w, idiom_num));
                     }
                 }
                 stamp_idiom(renditions, icon_rend_start, idiom_num);
@@ -847,7 +847,6 @@ impl AssetCatalog {
 
             let (pixel_data, width, height, pixel_format) =
                 load_image_as_bgra(&img_path, self.force_bgra)?;
-            let pixel_size = point_w * scale;
             let dim2 = self.icon_size_index(point_w);
             renditions.push(Rendition {
                 name: filename.to_string(),
@@ -868,30 +867,43 @@ impl AssetCatalog {
                 ..Rendition::default()
             });
             stamp_idiom(renditions, icon_rend_start, idiom_num);
-            icon_renditions.push((point_w, pixel_size));
+            icon_renditions.push((point_w, idiom_num));
         }
 
         if icon_renditions.is_empty() {
             return Ok(());
         }
 
-        let mut ms_entries: Vec<MultisizeImageEntry> = Vec::new();
-        let mut seen: HashSet<u32> = HashSet::new();
-        for (point_w, _) in &icon_renditions {
-            if seen.insert(*point_w) {
-                ms_entries.push(MultisizeImageEntry {
-                    width: *point_w,
-                    height: *point_w,
-                    index: self.icon_size_index(*point_w) as u32,
-                });
+        // Group the icon point sizes by idiom and emit one MultiSized
+        // rendition per idiom. iOS keys each by idiom (attr 15), so phone,
+        // pad and marketing get their own icon facet; macOS uses idiom 0
+        // throughout, collapsing to the single combined facet as before.
+        let mut sizes_by_idiom: IndexMap<u16, Vec<u32>> = IndexMap::new();
+        for (point_w, idiom) in &icon_renditions {
+            let sizes = sizes_by_idiom.entry(*idiom).or_default();
+            if !sizes.contains(point_w) {
+                sizes.push(*point_w);
             }
         }
-        // Apple's multisize entries are listed in ascending point-size
-        // order. Our discovery order is filesystem-defined (which sorts
-        // strings lexically, so "128" < "16"), so reorder by width.
-        ms_entries.sort_by_key(|e| e.width);
-        let ms_rend = car::build_multisize_rendition(&name, ident, &ms_entries);
-        renditions.push(ms_rend);
+        let mut idioms: Vec<u16> = sizes_by_idiom.keys().copied().collect();
+        idioms.sort_unstable();
+        for idiom in idioms {
+            let mut sizes = sizes_by_idiom.shift_remove(&idiom).unwrap();
+            // Apple lists multisize entries in ascending point-size order; our
+            // discovery order is filesystem-defined ("128" sorts before "16").
+            sizes.sort_unstable();
+            let ms_entries: Vec<MultisizeImageEntry> = sizes
+                .iter()
+                .map(|w| MultisizeImageEntry {
+                    width: *w,
+                    height: *w,
+                    index: self.icon_size_index(*w) as u32,
+                })
+                .collect();
+            let mut ms_rend = car::build_multisize_rendition(&name, ident, &ms_entries);
+            ms_rend.idiom = idiom;
+            renditions.push(ms_rend);
+        }
 
         facets.insert(
             name,

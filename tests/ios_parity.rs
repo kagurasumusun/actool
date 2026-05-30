@@ -400,3 +400,43 @@ fn ios_appicon_packs_into_atlases_with_dim1_and_keeps_idiom() {
     }
     assert!(packed_phone, "expected a phone-idiom packed atlas key");
 }
+
+#[test]
+fn ios_appicon_multisize_split_per_idiom() {
+    let root = workspace_tmp("ios_appicon_msplit");
+    build_appicon_catalog(
+        &root,
+        &[
+            ("20x20", "2x", "iphone"),
+            ("60x60", "2x", "iphone"),
+            ("76x76", "2x", "ipad"),
+            ("1024x1024", "1x", "ios-marketing"),
+        ],
+    );
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    compile_ios_icon(&root.join("A.xcassets"), &out);
+
+    let car = std::fs::read(out.join("Assets.car")).expect("car");
+    let kf = keyformat(&car);
+    let part_col = kf.iter().position(|t| *t == 2).unwrap();
+    let idiom_col = kf.iter().position(|t| *t == 15).unwrap();
+
+    // One MultiSized icon facet (part 218) per idiom: phone(1), pad(2),
+    // marketing(6) — keyed by idiom rather than a single combined facet.
+    let mut multisize_idioms = std::collections::HashSet::new();
+    for i in (0..car.len().saturating_sub(kf.len() * 2)).step_by(2) {
+        let cols: Vec<u16> = (0..kf.len())
+            .map(|c| u16::from_le_bytes(car[i + c * 2..i + c * 2 + 2].try_into().unwrap()))
+            .collect();
+        if cols[part_col] == 218 && cols[0] == 0 && cols[1] == 0 {
+            multisize_idioms.insert(cols[idiom_col]);
+        }
+    }
+    for idiom in [1u16, 2, 6] {
+        assert!(
+            multisize_idioms.contains(&idiom),
+            "expected a MultiSized facet for idiom {idiom}"
+        );
+    }
+}
