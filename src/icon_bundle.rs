@@ -465,31 +465,45 @@ fn build_icon_car(
     let mut packed_imgs_per_variant: Vec<Vec<crate::packer::PackedImage>> =
         variants.iter().map(|_| Vec::new()).collect();
 
+    // For non-variant bundles the sized rendition is the layer composited over
+    // the background gradient (Gradient-1, the light/primary fill) and clipped
+    // to the macOS squircle. Resolve it once; with no gradient we fall back to
+    // the raw layer.
+    let light_fill = gradient_assets.first().and_then(|g| resolve_gradient_fill(g, color_assets));
+
     // Split images into atlas candidates (small sizes) and inline (large).
     // For each size load BGRA pixels, then dispatch by point size. When
     // `emit_variant_axis` is set, every sized rendition is duplicated for
     // the alternate variant (same pixels — the variant axis is structural;
     // CUICatalog reads it to pick which alternate to display per-appearance).
     for (img_path, pixel_size, scale) in icon_images {
-        // When the variant axis is active we convert to GA8/GA16 below, which
-        // requires true 4-byte BGRA input. A grayscale source would otherwise
-        // load as GA8 and be misread as BGRA (half the rows), so force BGRA.
-        let (pd_bgra, w, h, pf_bgra) = load_image_as_bgra(img_path, emit_variant_axis)?;
+        // Force BGRA: the compositor and the GA8/GA16 conversion below both
+        // need true 4-byte pixels (a grayscale source would otherwise load as
+        // GA8 and be misread as BGRA, halving the rows).
+        let (layer_bgra, w, h, _pf_bgra) = load_image_as_bgra(img_path, true)?;
         let point_size = pixel_size / scale;
         let dim2 = icon_dim2(point_size);
         for &variant in variants {
-            // The variant axis is also a render-target switch: Apple stores
-            // the sized renditions as grayscale tinting masks. variant=0
-            // becomes GA8 (cspace=2), variant=1 becomes GA16 (cspace=6).
-            // When the axis is inactive (most fixtures), keep BGRA.
+            // The variant axis is also a render-target switch: Apple stores the
+            // sized renditions as grayscale tinting MASKS (variant 0 → GA8
+            // cspace 2, variant 1 → GA16 cspace 6) that CUICatalog tints and
+            // composites over the gradient itself — so we keep the bare layer
+            // there. Without the variant axis the sized rendition is the final
+            // BGRA composite: the layer over the background gradient clipped to
+            // the squircle, which we render here.
             let (pd, pf, cs_id): (Vec<u8>, [u8; 4], u32) = if emit_variant_axis {
                 if variant == 0 {
-                    (crate::catalog::bgra_to_ga8_force(&pd_bgra), *b" 8AG", 2)
+                    (crate::catalog::bgra_to_ga8_force(&layer_bgra), *b" 8AG", 2)
                 } else {
-                    (crate::catalog::bgra_to_ga16_force(&pd_bgra), *b"61AG", 6)
+                    (crate::catalog::bgra_to_ga16_force(&layer_bgra), *b"61AG", 6)
                 }
             } else {
-                (pd_bgra.clone(), pf_bgra, car::colorspace_for_pixel_format(&pf_bgra))
+                let composited = match light_fill.as_ref() {
+                    Some(f) => crate::icon_render::composite_icon(*pixel_size, f, &layer_bgra)
+                        .unwrap_or_else(|| layer_bgra.clone()),
+                    None => layer_bgra.clone(),
+                };
+                (composited, *b"BGRA", car::colorspace_for_pixel_format(b"BGRA"))
             };
             let name = pre_rendered_name(
                 icon_name,
@@ -943,6 +957,39 @@ struct GradientAsset {
     /// 0 = single-color (radial-style; Apple emits this for the user
     /// color in `automatic-gradient`), 1 = linear top-to-bottom.
     kind: u32,
+}
+
+/// Treat a Color's stored components as device-RGB for compositing. Gray /
+/// extended-gray (2 components) expand to a neutral triple; 4-component
+/// spaces (srgb / p3) pass their RGB through (p3→sRGB primaries differ, but
+/// the gray-axis backgrounds we composite are unaffected).
+fn color_to_rgb(c: &ColorAsset) -> [f64; 3] {
+    match c.components.as_slice() {
+        [g, _a] => [*g, *g, *g],
+        [r, g, b, _a] => [*r, *g, *b],
+        _ => [0.0, 0.0, 0.0],
+    }
+}
+
+/// Resolve a GradientAsset into a renderable background fill, looking up each
+/// stop's RGB in the palette. A single-stop gradient fills both ends with the
+/// same color.
+fn resolve_gradient_fill(
+    grad: &GradientAsset,
+    colors: &[ColorAsset],
+) -> Option<crate::icon_render::GradientFill> {
+    let rgb = |facet: &str| -> Option<[f64; 3]> {
+        colors.iter().find(|c| c.facet_name == facet).map(color_to_rgb)
+    };
+    let start_rgb = rgb(&grad.stops.first()?.1)?;
+    let stop_rgb = rgb(&grad.stops.last()?.1)?;
+    let g = grad.geometry;
+    Some(crate::icon_render::GradientFill {
+        start_rgb,
+        stop_rgb,
+        start: [g[0], g[1]],
+        stop: [g[2], g[3]],
+    })
 }
 
 /// Apple's default palette for `fill: "automatic"`. Empirically observed in

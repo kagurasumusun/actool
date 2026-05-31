@@ -64,10 +64,14 @@ every functional lookup.
 
 * **Pre-rendered sized renditions** (Icon Image 16…1024) and the
   **ZZZZPackedAsset atlases**. Apple composites the full icon stack
-  (gradients + layer + shadow + blur + specular + translucency) at each size;
-  we rasterize the source. Pixels — and therefore compressed `SizeOnDisk` —
-  differ. Same class as the dropped iOS app-icon atlas geometry
-  (`atlas-packing.md`).
+  (gradients + layer + shadow + blur + specular + translucency) at each size.
+  We reproduce the bulk of this (see "Styling pipeline" below): the layer over
+  the background gradient, clipped to the macOS squircle, rendered with Apple's
+  own CoreSVG + CoreGraphics. The remaining per-pixel difference is the
+  proprietary "liquid glass" treatment — drop shadow, specular highlight and
+  the raised glass shading of the layer — for which there is no public
+  algorithm, so pixels (and compressed `SizeOnDisk`) still differ. Same class
+  as the dropped iOS app-icon atlas geometry (`atlas-packing.md`).
 * **IconGroup CSI geometry** (TLV `0x03F4`). Apple stores the group's
   *computed* bounding box (e.g. feishin `[off 106,62, size 890,890]`) derived
   from the group `position.scale` (2.2) and the layer's scale/translation; we
@@ -76,6 +80,34 @@ every functional lookup.
   Both require the IconComposer layout engine. The IconGroup facet is
   non-functional in Apple's own `.car` (fails `imagesWithName:`), so this is
   cosmetic.
+
+## Styling pipeline (`icon_render.rs`)
+
+What `/usr/bin/actool` bakes into each non-variant sized rendition, recovered
+by rendering Apple's `.car` through CUICatalog (`tools/extract_pixels`):
+
+1. **Squircle clip** — a rounded-rect inset `100/1024` of the canvas with
+   corner radius `220/1024` (measured from Apple's 1024px output).
+2. **Background gradient** — the icon's light gradient (`Gradient-1`), its two
+   stop colors and `orientation` taken from the palette.
+3. **Layer** — drawn on top, clipped to the same squircle.
+
+We render all three with the **same Apple rasterizers** the system actool uses
+— CoreSVG for the layer (`svg_raster.rs`), CoreGraphics for the gradient/mask
+(`icon_render.rs`) — so a gradient-only icon matches Apple to ≈4/channel. With
+an opaque layer the gradient + mask are correct but the layer differs by the
+glass shading (≈30/channel average; the shape and gradient are right). Before
+this, sized renditions were the raw layer on a full square; now non-variant
+`.icon` bundles render as proper macOS squircle icons.
+
+Not reproduced: the drop shadow, specular highlight, and the layer's raised
+glass shading; the exact layer inset/scale (Apple insets the layer slightly).
+
+**Variant-axis bundles** (top-level `fill-specializations`, e.g. feishin /
+scrumdinger) are unchanged: their sized renditions are GA8/GA16 *tint masks*
+that CUICatalog composites against the gradient itself (a different render
+path), and a deepmap2-coded mask we don't yet decode — so the squircle
+compositing above is applied only to the non-variant (BGRA) path.
 
 ## Reproduce
 
