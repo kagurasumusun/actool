@@ -644,10 +644,13 @@ fn build_icon_car(
     ms_rend.keyformat = placeholder_kf.clone();
     renditions.push(ms_rend);
 
+    // Apple's FACETKEYS entry for the main icon facet carries part = PART_ICON
+    // (220), the part of its pre-rendered sized renditions — not the
+    // PART_ICON_COMPOSER (245) of the iconstack rendition.
     let mut facets: Vec<FacetEntry> = vec![(
         icon_name.to_string(),
         car::ELEMENT_UNIVERSAL,
-        Some(car::PART_ICON_COMPOSER),
+        Some(car::PART_ICON),
         ident,
     )];
     // Group facets — `<stem>/<group_name>` — appear in Apple's FACETKEYS
@@ -1286,6 +1289,196 @@ fn append_layer_fill_colors(
     }
 }
 
+/// Resolve a fill-specialization keyword `value` to its background gray pair
+/// (top stop, bottom stop). "system-light"/"system-dark" are fixed; bare
+/// "automatic" resolves by the entry's appearance (dark → dark pair, else
+/// the light pair). Returns None for keywords we don't model.
+fn keyword_bg_pair(keyword: &str, appearance: Option<&str>) -> Option<(f64, f64)> {
+    match keyword {
+        "system-light" => Some((1.0, 0.925)),
+        "system-dark" => Some((0.192, 0.078)),
+        "automatic" => {
+            if appearance == Some("dark") {
+                Some((0.192, 0.078))
+            } else {
+                Some((1.0, 0.925))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Add a Color, deduplicating by (colorspace, components). Returns the facet
+/// name of the existing or newly-created Color so gradients can reference it.
+fn palette_add_color(
+    colors: &mut Vec<ColorAsset>,
+    facet_prefix: &str,
+    colorspace_id: u32,
+    components: Vec<f64>,
+) -> String {
+    if let Some(existing) = colors
+        .iter()
+        .find(|c| c.colorspace_id == colorspace_id && c.components == components)
+    {
+        return existing.facet_name.clone();
+    }
+    let idx = colors.len() + 1;
+    let name = format!("{facet_prefix}_Assets/Color-{idx}");
+    colors.push(ColorAsset {
+        facet_name: name.clone(),
+        colorspace_id,
+        components,
+    });
+    name
+}
+
+/// Add a linear Gradient, deduplicating by (geometry, stops). A layer-level
+/// keyword fill that resolves to a background pair already emitted (e.g.
+/// scrumdinger's redundant dark "automatic") collapses to nothing here.
+fn palette_add_gradient(
+    gradients: &mut Vec<GradientAsset>,
+    facet_prefix: &str,
+    geometry: [f32; 4],
+    stops: Vec<(f32, String)>,
+) {
+    if gradients
+        .iter()
+        .any(|g| g.kind == 1 && g.geometry == geometry && g.stops == stops)
+    {
+        return;
+    }
+    let idx = gradients.len() + 1;
+    gradients.push(GradientAsset {
+        facet_name: format!("{facet_prefix}_Assets/Gradient-{idx}"),
+        geometry,
+        stops,
+        kind: 1,
+    });
+}
+
+/// Read a gradient `orientation` object into geometry [start.x, start.y,
+/// stop.x, stop.y]. Defaults to a top-to-bottom gradient when absent.
+fn parse_orientation(obj: &serde_json::Map<String, serde_json::Value>) -> [f32; 4] {
+    let default = [0.5f32, 0.0, 0.5, 1.0];
+    let Some(orient) = obj.get("orientation") else {
+        return default;
+    };
+    let pt = |key: &str, dx: f32, dy: f32| -> (f32, f32) {
+        let p = orient.get(key);
+        let x = p
+            .and_then(|o| o.get("x"))
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32)
+            .unwrap_or(dx);
+        let y = p
+            .and_then(|o| o.get("y"))
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32)
+            .unwrap_or(dy);
+        (x, y)
+    };
+    let (sx, sy) = pt("start", 0.5, 0.0);
+    let (ex, ey) = pt("stop", 0.5, 1.0);
+    [sx, sy, ex, ey]
+}
+
+/// Fold one fill-specialization `value` into the running palette. Handles the
+/// three value shapes Apple emits: a keyword ("system-light"/"system-dark"/
+/// "automatic") → a two-stop gray background gradient; a structured
+/// `{linear-gradient: [...], orientation}` → its stops + an oriented gradient;
+/// and `{solid: "<spec>"}` → a single color.
+fn process_fill_value(
+    value: &serde_json::Value,
+    appearance: Option<&str>,
+    facet_prefix: &str,
+    colors: &mut Vec<ColorAsset>,
+    gradients: &mut Vec<GradientAsset>,
+) {
+    let g = |v: f64| (v as f32) as f64;
+    if let Some(s) = value.as_str() {
+        if let Some((top, bottom)) = keyword_bg_pair(s, appearance) {
+            let c0 = palette_add_color(colors, facet_prefix, 2, vec![g(top), g(1.0)]);
+            let c1 = palette_add_color(colors, facet_prefix, 2, vec![g(bottom), g(1.0)]);
+            palette_add_gradient(
+                gradients,
+                facet_prefix,
+                [0.5, 0.0, 0.5, 1.0],
+                vec![(0.0, c0), (1.0, c1)],
+            );
+        }
+        return;
+    }
+    let Some(obj) = value.as_object() else {
+        return;
+    };
+    if let Some(arr) = obj.get("linear-gradient").and_then(|x| x.as_array()) {
+        let specs: Vec<&str> = arr.iter().filter_map(|x| x.as_str()).collect();
+        if specs.len() < 2 {
+            return;
+        }
+        let geometry = parse_orientation(obj);
+        let mut names = Vec::with_capacity(specs.len());
+        for spec in &specs {
+            let Some((cspace, comps)) = parse_color_spec(spec) else {
+                return;
+            };
+            names.push(palette_add_color(colors, facet_prefix, cspace, comps));
+        }
+        let last = (names.len() - 1) as f32;
+        let stops: Vec<(f32, String)> = names
+            .into_iter()
+            .enumerate()
+            .map(|(i, n)| (i as f32 / last, n))
+            .collect();
+        palette_add_gradient(gradients, facet_prefix, geometry, stops);
+    } else if let Some(solid) = obj.get("solid").and_then(|x| x.as_str()) {
+        if let Some((cspace, comps)) = parse_color_spec(solid) {
+            palette_add_color(colors, facet_prefix, cspace, comps);
+        }
+    }
+}
+
+/// Apple's palette for a top-level `fill-specializations` block. The white
+/// anchor Color-1 is always first; then each top-level specialization is
+/// folded in document order, followed by every layer's fill and
+/// fill-specializations. Reverse-engineered against feishin (custom p3
+/// gradient + system-dark + layer gradient → 8 Colors / 3 Gradients) and
+/// scrumdinger (system-light + automatic → 5 Colors / 2 Gradients).
+fn fill_specializations_assets(
+    facet_prefix: &str,
+    json: &IconJson,
+) -> (Vec<ColorAsset>, Vec<GradientAsset>) {
+    let g = |v: f32| (v as f32) as f64;
+    let mut colors = vec![ColorAsset {
+        facet_name: format!("{facet_prefix}_Assets/Color-1"),
+        colorspace_id: 6,
+        components: vec![g(1.0), g(1.0)],
+    }];
+    let mut gradients: Vec<GradientAsset> = Vec::new();
+    if let Some(specs) = json.fill_specializations.as_ref() {
+        for sp in specs {
+            let appearance = sp.get("appearance").and_then(|a| a.as_str());
+            if let Some(v) = sp.get("value") {
+                process_fill_value(v, appearance, facet_prefix, &mut colors, &mut gradients);
+            }
+        }
+    }
+    for (_group, layer) in json.iter_layers() {
+        if let Some(Fill::Structured(v)) = layer.fill.as_ref() {
+            process_fill_value(v, None, facet_prefix, &mut colors, &mut gradients);
+        }
+        if let Some(specs) = layer.fill_specializations.as_ref() {
+            for sp in specs {
+                let appearance = sp.get("appearance").and_then(|a| a.as_str());
+                if let Some(v) = sp.get("value") {
+                    process_fill_value(v, appearance, facet_prefix, &mut colors, &mut gradients);
+                }
+            }
+        }
+    }
+    (colors, gradients)
+}
+
 /// Try to derive Color/Gradient assets from an arbitrary fill spec.
 /// Returns None when the spec shape is unrecognized — caller falls back
 /// to no palette and the catalog stays self-consistent.
@@ -1294,6 +1487,16 @@ fn fill_assets(
     fill: Option<&Fill>,
     parsed: &IconJson,
 ) -> Option<(Vec<ColorAsset>, Vec<GradientAsset>)> {
+    // A top-level `fill-specializations` block drives its own appearance-keyed
+    // palette, distinct from the single-`fill` shapes below.
+    if parsed
+        .fill_specializations
+        .as_ref()
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+    {
+        return Some(fill_specializations_assets(facet_prefix, parsed));
+    }
     if fill_is_automatic(fill) {
         let (mut colors, gradients) = automatic_fill_assets(facet_prefix);
         append_layer_fill_colors(facet_prefix, parsed, &mut colors);
@@ -1480,6 +1683,68 @@ mod tests {
         let c = pre_rendered_name("Icon", 64, 2, "NSAppearanceNameSystem");
         assert_ne!(a, b);
         assert_ne!(b, c);
+    }
+
+    fn palette(json: &str) -> (Vec<ColorAsset>, Vec<GradientAsset>) {
+        let parsed = crate::icon_json::IconJson::parse(json).unwrap();
+        fill_specializations_assets("X", &parsed)
+    }
+
+    #[test]
+    fn fill_specializations_feishin_palette() {
+        // Top-level custom p3 gradient + system-dark, then a layer with a
+        // default solid, a dark gradient (whose 2nd stop dedups to Color-2),
+        // and a tinted solid → Apple's 8 Colors / 3 Gradients.
+        let (colors, gradients) = palette(
+            r#"{
+              "fill-specializations":[
+                {"value":{"linear-gradient":[
+                    "display-p3:0.87416,0.87416,0.87416,1.0",
+                    "display-p3:0.99575,0.99575,0.99575,1.0"],
+                  "orientation":{"start":{"x":0.5,"y":1},"stop":{"x":0.5,"y":0.3}}}},
+                {"appearance":"dark","value":"system-dark"}
+              ],
+              "groups":[{"layers":[{"image-name":"f.svg","name":"f",
+                "fill-specializations":[
+                  {"value":{"solid":"extended-gray:0.0,1.0"}},
+                  {"appearance":"dark","value":{"linear-gradient":[
+                      "display-p3:0.78674,0.78674,0.78674,1.0",
+                      "display-p3:0.87416,0.87416,0.87416,1.0"],
+                    "orientation":{"start":{"x":0.5,"y":1},"stop":{"x":0.5,"y":0}}}},
+                  {"appearance":"tinted","value":{"solid":"gray:1.0,1.0"}}
+                ]}]}]
+            }"#,
+        );
+        assert_eq!(colors.len(), 8, "feishin should have 8 colors");
+        assert_eq!(gradients.len(), 3, "feishin should have 3 gradients");
+        // Colorspaces: anchor(6), 2×p3(3), 2×gray(2), ext-gray(6), p3(3), gray(2)
+        let cs: Vec<u32> = colors.iter().map(|c| c.colorspace_id).collect();
+        assert_eq!(cs, vec![6, 3, 3, 2, 2, 6, 3, 2]);
+        // The layer dark-gradient's second stop dedups onto Color-2.
+        assert_eq!(gradients[2].stops[0].1, "X_Assets/Color-7");
+        assert_eq!(gradients[2].stops[1].1, "X_Assets/Color-2");
+        // Gradient-1 carries the JSON orientation (top→0.3), not the default.
+        assert_eq!(gradients[0].geometry, [0.5, 1.0, 0.5, 0.3]);
+    }
+
+    #[test]
+    fn fill_specializations_scrumdinger_palette() {
+        // system-light + dark automatic, plus a redundant layer dark automatic
+        // that dedups entirely → 5 Colors / 2 Gradients (no Gradient-3).
+        let (colors, gradients) = palette(
+            r#"{
+              "fill-specializations":[
+                {"value":"system-light"},
+                {"appearance":"dark","value":"automatic"}
+              ],
+              "groups":[{"layers":[{"image-name":"1.png","name":"1",
+                "fill-specializations":[{"appearance":"dark","value":"automatic"}]}]}]
+            }"#,
+        );
+        assert_eq!(colors.len(), 5, "scrumdinger should have 5 colors");
+        assert_eq!(gradients.len(), 2, "redundant layer automatic must dedup");
+        let cs: Vec<u32> = colors.iter().map(|c| c.colorspace_id).collect();
+        assert_eq!(cs, vec![6, 2, 2, 2, 2]);
     }
 }
 
