@@ -163,6 +163,46 @@ fn linear_gradient_top_level_fill_compiles() {
 }
 
 #[test]
+fn grayscale_source_with_variant_axis_compiles() {
+    // Regression: a grayscale source PNG loads as GA8 (2 bytes/pixel), but
+    // the top-level fill-specializations path converts sized renditions to
+    // GA8/GA16 assuming BGRA input. Misreading GA8 as 4-byte BGRA chunks
+    // halved the row count and panicked with an out-of-range slice. See the
+    // feishin.icon bundle. We must load such sources as BGRA before the
+    // GA conversion.
+    let parent = tmpdir();
+    let bundle = parent.join("Gray.icon");
+    std::fs::create_dir_all(bundle.join("Assets")).unwrap();
+    write_synthetic_png(&bundle.join("Assets/main.png"), 1024, [128, 128, 128, 255]);
+    std::fs::write(
+        bundle.join("icon.json"),
+        r#"{
+          "fill-specializations":[
+            {"value":{"linear-gradient":["display-p3:1,1,1,1","display-p3:0.5,0.5,0.5,1"]}},
+            {"appearance":"dark","value":"system-dark"}
+          ],
+          "groups":[{"name":"G","layers":[{"image-name":"main.png","name":"a"}]}]
+        }"#,
+    )
+    .unwrap();
+    let out = parent.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let plist = out.join("info.plist");
+    let files = compile_icon_bundle(
+        &bundle,
+        &out,
+        "macosx",
+        "26.0",
+        Some("Gray"),
+        Some(&plist),
+        None,
+        "default",
+    )
+    .expect("grayscale + variant-axis bundle should compile, not panic");
+    assert_three_file_output(&files, "Gray");
+}
+
+#[test]
 fn automatic_gradient_fill_compiles() {
     let files = compile_ok(
         "AutoGrad",

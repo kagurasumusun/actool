@@ -510,7 +510,10 @@ fn build_icon_car(
     // the alternate variant (same pixels — the variant axis is structural;
     // CUICatalog reads it to pick which alternate to display per-appearance).
     for (img_path, pixel_size, scale) in icon_images {
-        let (pd_bgra, w, h, pf_bgra) = load_image_as_bgra(img_path, false)?;
+        // When the variant axis is active we convert to GA8/GA16 below, which
+        // requires true 4-byte BGRA input. A grayscale source would otherwise
+        // load as GA8 and be misread as BGRA (half the rows), so force BGRA.
+        let (pd_bgra, w, h, pf_bgra) = load_image_as_bgra(img_path, emit_variant_axis)?;
         let point_size = pixel_size / scale;
         let dim2 = icon_dim2(point_size);
         for &variant in variants {
