@@ -151,6 +151,14 @@ icon): our coffee cup matches Apple's — body lum 39 vs 45, rim-highlight peak
 Parameters resolved; these remain the proprietary shaders. See
 `docs/icon-bundle-parity.md`.
 
-> The transmission fixture (deep multi-group SVG icon) exercises `screen`/
-> `overlay` blends but also hits unrelated SVG-layer rendering gaps, so it isn't
-> yet a clean end-to-end check; the blend math is unit-tested directly.
+**Per-layer fill gradients (multi-group palette).** A multi-group icon's layers
+can each declare their own `fill-specializations` linear-gradients (transmission's
+ArrowLines / OuterEdge, Rectangle's Dots). These are now folded into the
+Color/Gradient palette via `append_layer_fills`, in document order, per
+appearance. Crucially the dedup scope differs by fill kind: a layer **solid**
+deduplicates against the whole palette (recipe-scraper's solid collapses onto
+its base gradient stop), but a **gradient-stop / keyword** colour deduplicates
+only against fold colours, not the hardcoded base — so Apple keeps transmission's
+`Color-12` (0.078) distinct from the automatic-gradient's `Color-4` (also 0.078).
+transmission's catalog now matches Apple's exactly (12 Colors / 6 Gradients,
+`validate_car` 19 OK / 32 — identical), as does Rectangle (7 / 3, 11 OK / 15).

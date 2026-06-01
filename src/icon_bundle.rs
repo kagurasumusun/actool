@@ -1755,55 +1755,6 @@ fn system_dark_fill_assets(facet_prefix: &str) -> (Vec<ColorAsset>, Vec<Gradient
     (colors, gradients)
 }
 
-/// Append a Color-N rendition for each layer-level solid color we haven't
-/// already emitted. Apple aggregates these from:
-///   * layer.fill = {"solid": "<spec>"}             — KYA's case
-///   * layer.fill-specializations[*].value.solid    — recipe-scraper's case
-/// Only specs that don't already appear in the base palette get a new
-/// Color-N. The fixtures we've inspected stable-sort by document order.
-fn append_layer_fill_colors(
-    facet_prefix: &str,
-    json: &IconJson,
-    colors: &mut Vec<ColorAsset>,
-) {
-    fn try_add(
-        spec: &str,
-        facet_prefix: &str,
-        colors: &mut Vec<ColorAsset>,
-    ) {
-        let Some((cspace, comps)) = parse_color_spec(spec) else {
-            return;
-        };
-        let already = colors
-            .iter()
-            .any(|c| c.colorspace_id == cspace && c.components == comps);
-        if already {
-            return;
-        }
-        let next_idx = colors.len() + 1;
-        colors.push(ColorAsset {
-            facet_name: format!("{facet_prefix}_Assets/Color-{next_idx}"),
-            colorspace_id: cspace,
-            components: comps,
-        });
-    }
-    for (_group, layer) in json.iter_layers() {
-        if let Some(Fill::Structured(v)) = layer.fill.as_ref() {
-            if let Some(spec) = v.get("solid").and_then(|s| s.as_str()) {
-                try_add(spec, facet_prefix, colors);
-            }
-        }
-        if let Some(specs) = layer.fill_specializations.as_ref() {
-            for sp in specs {
-                let Some(value) = sp.get("value") else { continue };
-                let Some(solid) = value.get("solid").and_then(|s| s.as_str()) else {
-                    continue;
-                };
-                try_add(solid, facet_prefix, colors);
-            }
-        }
-    }
-}
 
 /// Resolve a fill-specialization keyword `value` to its background gray pair
 /// (top stop, bottom stop). "system-light"/"system-dark" are fixed; bare
@@ -1826,13 +1777,19 @@ fn keyword_bg_pair(keyword: &str, appearance: Option<&str>) -> Option<(f64, f64)
 
 /// Add a Color, deduplicating by (colorspace, components). Returns the facet
 /// name of the existing or newly-created Color so gradients can reference it.
+/// Add a Color, deduplicating against existing entries at index `dedup_from`
+/// and later. Solids pass `dedup_from = 0` (dedup against the whole palette);
+/// gradient-stop / keyword colours pass the base-palette length so they don't
+/// collapse onto a hardcoded base colour — Apple keeps e.g. transmission's
+/// Color-12 (0.078) distinct from the automatic-gradient's Color-4 (also 0.078).
 fn palette_add_color(
     colors: &mut Vec<ColorAsset>,
     facet_prefix: &str,
     colorspace_id: u32,
     components: Vec<f64>,
+    dedup_from: usize,
 ) -> String {
-    if let Some(existing) = colors
+    if let Some(existing) = colors[dedup_from.min(colors.len())..]
         .iter()
         .find(|c| c.colorspace_id == colorspace_id && c.components == components)
     {
@@ -1909,12 +1866,13 @@ fn process_fill_value(
     facet_prefix: &str,
     colors: &mut Vec<ColorAsset>,
     gradients: &mut Vec<GradientAsset>,
+    grad_floor: usize,
 ) {
     let g = |v: f64| (v as f32) as f64;
     if let Some(s) = value.as_str() {
         if let Some((top, bottom)) = keyword_bg_pair(s, appearance) {
-            let c0 = palette_add_color(colors, facet_prefix, 2, vec![g(top), g(1.0)]);
-            let c1 = palette_add_color(colors, facet_prefix, 2, vec![g(bottom), g(1.0)]);
+            let c0 = palette_add_color(colors, facet_prefix, 2, vec![g(top), g(1.0)], grad_floor);
+            let c1 = palette_add_color(colors, facet_prefix, 2, vec![g(bottom), g(1.0)], grad_floor);
             palette_add_gradient(
                 gradients,
                 facet_prefix,
@@ -1938,7 +1896,7 @@ fn process_fill_value(
             let Some((cspace, comps)) = parse_color_spec(spec) else {
                 return;
             };
-            names.push(palette_add_color(colors, facet_prefix, cspace, comps));
+            names.push(palette_add_color(colors, facet_prefix, cspace, comps, grad_floor));
         }
         let last = (names.len() - 1) as f32;
         let stops: Vec<(f32, String)> = names
@@ -1948,8 +1906,10 @@ fn process_fill_value(
             .collect();
         palette_add_gradient(gradients, facet_prefix, geometry, stops);
     } else if let Some(solid) = obj.get("solid").and_then(|x| x.as_str()) {
+        // Solids deduplicate against the whole palette (recipe-scraper's layer
+        // solid collapses onto its base gradient stop).
         if let Some((cspace, comps)) = parse_color_spec(solid) {
-            palette_add_color(colors, facet_prefix, cspace, comps);
+            palette_add_color(colors, facet_prefix, cspace, comps, 0);
         }
     }
 }
@@ -1971,28 +1931,46 @@ fn fill_specializations_assets(
         components: vec![g(1.0), g(1.0)],
     }];
     let mut gradients: Vec<GradientAsset> = Vec::new();
+    // The whole top-spec palette is one fold, so gradient colours deduplicate
+    // against everything (floor 0).
     if let Some(specs) = json.fill_specializations.as_ref() {
         for sp in specs {
             let appearance = sp.get("appearance").and_then(|a| a.as_str());
             if let Some(v) = sp.get("value") {
-                process_fill_value(v, appearance, facet_prefix, &mut colors, &mut gradients);
+                process_fill_value(v, appearance, facet_prefix, &mut colors, &mut gradients, 0);
             }
         }
     }
+    append_layer_fills(facet_prefix, json, &mut colors, &mut gradients, 0);
+    (colors, gradients)
+}
+
+/// Fold every layer's `fill` and `fill-specializations` into the palette via
+/// [`process_fill_value`] — adding the colours (deduplicated) and, for
+/// linear-gradient layer fills, their gradients (per appearance entry, in
+/// document order). Used by both the top-level fill-specializations path and
+/// the plain-`fill` paths so a multi-group icon's per-layer gradients (e.g.
+/// transmission's ArrowLines / OuterEdge) are emitted like Apple's.
+fn append_layer_fills(
+    facet_prefix: &str,
+    json: &IconJson,
+    colors: &mut Vec<ColorAsset>,
+    gradients: &mut Vec<GradientAsset>,
+    grad_floor: usize,
+) {
     for (_group, layer) in json.iter_layers() {
         if let Some(Fill::Structured(v)) = layer.fill.as_ref() {
-            process_fill_value(v, None, facet_prefix, &mut colors, &mut gradients);
+            process_fill_value(v, None, facet_prefix, colors, gradients, grad_floor);
         }
         if let Some(specs) = layer.fill_specializations.as_ref() {
             for sp in specs {
                 let appearance = sp.get("appearance").and_then(|a| a.as_str());
                 if let Some(v) = sp.get("value") {
-                    process_fill_value(v, appearance, facet_prefix, &mut colors, &mut gradients);
+                    process_fill_value(v, appearance, facet_prefix, colors, gradients, grad_floor);
                 }
             }
         }
     }
-    (colors, gradients)
 }
 
 /// Try to derive Color/Gradient assets from an arbitrary fill spec.
@@ -2014,34 +1992,39 @@ fn fill_assets(
         return Some(fill_specializations_assets(facet_prefix, parsed));
     }
     if fill_is_automatic(fill) {
-        let (mut colors, gradients) = automatic_fill_assets(facet_prefix);
-        append_layer_fill_colors(facet_prefix, parsed, &mut colors);
+        let (mut colors, mut gradients) = automatic_fill_assets(facet_prefix);
+        let base = colors.len();
+            append_layer_fills(facet_prefix, parsed, &mut colors, &mut gradients, base);
         return Some((colors, gradients));
     }
     let fill_val = fill?;
     match fill_val {
         Fill::Keyword(k) if k == "system-dark" => {
-            let (mut colors, gradients) = system_dark_fill_assets(facet_prefix);
-            append_layer_fill_colors(facet_prefix, parsed, &mut colors);
+            let (mut colors, mut gradients) = system_dark_fill_assets(facet_prefix);
+            let base = colors.len();
+            append_layer_fills(facet_prefix, parsed, &mut colors, &mut gradients, base);
             Some((colors, gradients))
         }
         Fill::Structured(v) => {
             if let Some(spec) = v.get("solid").and_then(|s| s.as_str()) {
-                let (mut colors, gradients) = solid_fill_assets(facet_prefix, spec)?;
-                append_layer_fill_colors(facet_prefix, parsed, &mut colors);
+                let (mut colors, mut gradients) = solid_fill_assets(facet_prefix, spec)?;
+                let base = colors.len();
+            append_layer_fills(facet_prefix, parsed, &mut colors, &mut gradients, base);
                 return Some((colors, gradients));
             }
             if let Some(spec) = v.get("automatic-gradient").and_then(|s| s.as_str()) {
-                let (mut colors, gradients) =
+                let (mut colors, mut gradients) =
                     automatic_gradient_fill_assets(facet_prefix, spec)?;
-                append_layer_fill_colors(facet_prefix, parsed, &mut colors);
+                let base = colors.len();
+            append_layer_fills(facet_prefix, parsed, &mut colors, &mut gradients, base);
                 return Some((colors, gradients));
             }
             if let Some(arr) = v.get("linear-gradient").and_then(|s| s.as_array()) {
                 let specs: Vec<&str> = arr.iter().filter_map(|x| x.as_str()).collect();
-                let (mut colors, gradients) =
+                let (mut colors, mut gradients) =
                     linear_gradient_fill_assets(facet_prefix, &specs)?;
-                append_layer_fill_colors(facet_prefix, parsed, &mut colors);
+                let base = colors.len();
+            append_layer_fills(facet_prefix, parsed, &mut colors, &mut gradients, base);
                 return Some((colors, gradients));
             }
             None
