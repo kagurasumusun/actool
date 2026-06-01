@@ -219,8 +219,22 @@ pub fn rasterize_svg(
             return Err(anyhow!("CGBitmapContextCreate failed"));
         }
 
-        if scale > 1 {
-            (syms.ctx_scale)(ctx, scale as c_double, scale as c_double);
+        // CGContextDrawSVGDocument draws the SVG at its intrinsic size, so to
+        // fill a buffer of a different size we must scale the SVG to fit it
+        // (otherwise a 1024-pt SVG asked for at 824 px is clipped to its
+        // top-left corner instead of scaled). When the requested width matches
+        // the SVG's native size this reduces to the integer `scale` and stays
+        // byte-identical to the old behaviour.
+        let (nw, nh) = parse_svg_dimensions(svg_data);
+        let (nw, nh) = if nw > 0 && nh > 0 {
+            (nw, nh)
+        } else {
+            (width.max(1), height.max(1))
+        };
+        let sx = pixel_w as c_double / nw as c_double;
+        let sy = pixel_h as c_double / nh as c_double;
+        if sx != 1.0 || sy != 1.0 {
+            (syms.ctx_scale)(ctx, sx, sy);
         }
         (syms.ctx_draw_svg)(ctx, svg_doc);
         let data_ptr = (syms.bitmap_get_data)(ctx);

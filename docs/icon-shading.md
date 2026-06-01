@@ -129,8 +129,15 @@ material) and, when the group's `specular` is on, gets a directional sheen —
 bottom-facing ones (light from the top), the raised "liquid glass" rim.
 Reverse-engineered against KeepingYouAwake (a non-variant `specular: true` glass
 icon): our coffee cup matches Apple's — body lum 39 vs 45, rim-highlight peak
-209 vs 209. (Its layer is still offset by an unrelated SVG content-centring
-gap.) feishin's specular is `tinted`-only, so it stays unrendered there.
+209 vs 209, cup centre (549,533) vs (550,524) once the SVG scaling was fixed
+(below). feishin's specular is `tinted`-only, so it stays unrendered there.
+
+> SVG layers are scaled to fit their target size. `svg_raster::rasterize_svg`
+> used to draw the SVG at its intrinsic size and only apply an integer scale, so
+> a 1024-pt layer asked for at the 824-px content size was *clipped* to its
+> top-left corner — the KYA cup landed oversized and offset. It now scales the
+> SVG by `target / native` (a no-op, hence byte-identical, when they already
+> match, as in the xcassets path). Mean diff over the KYA icon dropped 48 → 15.
 
 **Blur-material / lighting / per-region glass detail — not rendered.**
 Parameters resolved; these remain the proprietary shaders. See
