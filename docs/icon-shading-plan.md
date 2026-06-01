@@ -102,15 +102,21 @@ currently read only from the first group.
 1. **All three shaders: no implementation needed** — per-region glass is
    negligible, lighting has no static effect, blur-material is ≤9/luma and
    saturates. The synthetic fixtures settled this.
-2. **Per-group compositing refactor** (the one valuable item) — *partially
-   done*. The frosted glass now keeps each layer's own colour (gradient ×
-   `glass_rgb` multiply), and the drop shadow is resolved from the first group
-   that requests one (not just `groups.first()`). This fixed Rectangle's blue
-   Overlay (mean diff 16.3 → 11.6) and its baked drop shadow without regressing
-   transmission (19/32) or scrumdinger. Still flattened into one reversed layer
-   list with a global glass-coverage union; a true group-by-group canvas (each
-   group's relief computed over only its own union) remains the next step, but no
-   current fixture exercises overlapping multi-group glass to measure it.
+2. **Per-group compositing refactor** (the one valuable item) — *done*.
+   - **Structural (CAR):** every group now emits its own IconGroup rendition
+     and the iconstack references all groups (back-to-front). Previously only
+     `group_facet_names[0]`/`layer_assets[0]` were wired, so a 2nd/3rd group's
+     facet had a FACETKEYS entry but no rendition — absent from BITMAPKEYS,
+     CUICatalog returned "no images" for it. Fixing this brought Rectangle to
+     30/30 renditions and **transmission to 49/49** (both matching Apple's
+     rendition count and `validate_car` exactly — 11/15 and 19/32, same facets).
+   - **Pixel (render):** frosted glass keeps each layer's colour (gradient ×
+     `glass_tint` multiply) **gated on `shadow: layer-color`**; overlapping
+     tinted groups stack their multiplies; the drop shadow is resolved from the
+     first group that requests one. Reverse-engineered against a synthetic
+     two-group overlapping-glass fixture (the gate + stacking were invisible in
+     every real fixture). Tint *strength* is renderer-bound and left at full
+     multiply (fits the real Rectangle fixture).
 3. Only if chasing the last luma: blur-material as a relief-strength multiplier
    (`min(value, 2)`), verified against the synthetic sweep above.
 

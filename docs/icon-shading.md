@@ -84,17 +84,34 @@ premultiplied-first BGRA, which the compositor draws over the gradient. A layer
 is glass if it opts in, or if the group is a *glass context* (translucency/blur
 enabled, or a sibling is glass) and it hasn't opted out with `glass: false`.
 
-Frosted glass **multiplies the background gradient by the layer's own colour**
-(`glass_rgb` per covered pixel) plus the slight vertical relief darkening, baked
-as an opaque pixel so the compositor reproduces a multiply blend over the same
-gradient. A saturated slab keeps its hue — Rectangle's blue Overlay
-(`bg × blue`, translucency 0.5) drops from a near-uniform grey (mean diff 16.3)
-to a recognisable blue right-half over a grey left-half (11.6); right-mid Apple
-`[7,67,104]` vs ours `[0,54,97]`. A light/neutral layer multiplies to ≈`bg`, so
-scrumdinger's near-white frost is unchanged, and an icon with no top-level
-gradient (scrumdinger's `fill: None`) hits the neutral-relief fallback
-byte-identically. This unifies the earlier strip-to-relief special case: that
-was just the light-layer limit of the multiply.
+Frosted glass keeps its colour **only when the group's shadow kind is
+`layer-color`** — that flag is what tells Apple the slab is "coloured glass". A
+synthetic two-group fixture pinned this down: flipping a glass group's shadow
+from `layer-color` to `none`/`neutral` strips the slab to a neutral grey relief
+(scrumdinger's groups are `neutral`, which is why its frost reads near-white;
+Rectangle's Overlay is `layer-color`, so its blue survives). The earlier
+"unconditional multiply" was wrong for non-`layer-color` glass.
+
+A *tinted* frosted layer (`layer-color`) multiplies the background gradient by
+its colour, accumulated into a per-pixel `glass_tint` (coverage-weighted), baked
+opaque so the compositor reproduces a multiply over the same gradient.
+Overlapping tinted groups **stack** their multiplies — `bg × blue × red` gives
+the dark-purple overlap Apple emits where a blue and a red glass group cross
+(verified on the synthetic). An untinted frosted layer leaves `glass_tint` at 1,
+so it only contributes the vertical relief darkening (≈`bg`), and an icon with
+no top-level gradient (scrumdinger's `fill: None`) hits the neutral-relief
+fallback byte-identically.
+
+Rectangle's blue Overlay drops from a near-uniform grey (mean diff 16.3) to a
+recognisable blue right-half over a grey left-half (11.5); right-mid Apple
+`[7,67,104]` vs ours `[0,54,97]`. The exact tint *strength* is renderer-bound —
+Rectangle wants a near-full multiply at translucency 0.5 while the synthetic's
+softer slabs want ≈0.4, with no clean law across them, so we keep the full
+multiply that fits the real fixture and accept the synthetic is over-saturated
+(an artificial fixture with no parity obligation). Full-canvas synthetic glass
+also reveals the `LAYER_BASE_SCALE` 824/1024 inset (Apple's glass fills the
+squircle) — left unchanged, since real fixtures design their layers for the
+content area.
 
 The glass darkening is **only ≈3%** — recovered by decoding Apple's scrumdinger
 GA8 and dividing the layer-region luma by the local background: out/bg ≈0.975

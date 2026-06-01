@@ -609,3 +609,69 @@ fn icns_gate_matches_apple_on_bundle_stem_vs_app_icon() {
         }
     }
 }
+
+/// Two overlapping glass groups with `shadow: layer-color` — the multi-group
+/// tinted-glass case the renderer reverse-engineered against a synthetic
+/// fixture (each group keeps its own colour; overlaps stack their multiplies).
+/// Here we only assert the *structural* invariants — that such a bundle
+/// compiles and loads (both group facets present, BITMAPKEYS populated). The
+/// pixel-level multiply/stack behaviour is unit-tested in `icon_bundle`.
+#[test]
+fn two_overlapping_glass_groups_compile_and_load() {
+    let dir = tempdir();
+    let bundle = dir.path().join("MultiGlass.icon");
+    let assets = bundle.join("Assets");
+    fs::create_dir_all(&assets).unwrap();
+    // Left and right overlapping rectangles (overlap in x:384..640).
+    fs::write(
+        assets.join("Left.svg"),
+        br##"<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect x="0" y="0" width="640" height="1024" fill="#0033E5"/>
+</svg>"##,
+    )
+    .unwrap();
+    fs::write(
+        assets.join("Right.svg"),
+        br##"<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect x="384" y="0" width="640" height="1024" fill="#E51900"/>
+</svg>"##,
+    )
+    .unwrap();
+    let group = |name: &str, img: &str, value: f32| {
+        serde_json::json!({
+            "name": name,
+            "layers": [{ "glass": true, "image-name": img, "name": name }],
+            "shadow": {"kind": "layer-color", "opacity": 0.5},
+            "translucency": {"enabled": true, "value": value},
+        })
+    };
+    let icon_json = serde_json::json!({
+        "fill": {"linear-gradient": ["display-p3:0.8,0.8,0.8,1.0", "srgb:0.4,0.4,0.4,1.0"]},
+        "groups": [group("Front", "Left.svg", 0.3), group("Back", "Right.svg", 0.5)],
+        "supported-platforms": {"squares": ["macOS"]},
+    });
+    fs::write(
+        bundle.join("icon.json"),
+        serde_json::to_string_pretty(&icon_json).unwrap(),
+    )
+    .unwrap();
+
+    let out = dir.path().join("out");
+    fs::create_dir_all(&out).unwrap();
+    let files = compile(&bundle, "MultiGlass", &out);
+    assert!(files.iter().any(|p| p.ends_with("Assets.car")));
+
+    let car = parse_car(&out.join("Assets.car"));
+    assert_eq!(car.coreui_version, 975);
+    let facets: std::collections::HashSet<_> = facet_names(&car).into_iter().collect();
+    for required in ["MultiGlass", "MultiGlass/Front", "MultiGlass/Back"] {
+        assert!(facets.contains(required), "missing group facet: {required}");
+    }
+    // BITMAPKEYS must list one entry per facet identifier (silent-failure guard).
+    let bk: std::collections::HashSet<u32> = bitmapkeys_idents(&car).into_iter().collect();
+    let idents: std::collections::HashSet<u32> =
+        facet_identifiers(&car).into_values().map(|v| v as u32).collect();
+    assert_eq!(bk, idents, "BITMAPKEYS must cover every facet identifier");
+}

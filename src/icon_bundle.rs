@@ -456,6 +456,12 @@ struct StackLayer {
     /// Frosted glass (glass + translucency enabled): drawn as a faint
     /// see-through relief rather than in its own colour.
     frosted: bool,
+    /// Tinted frosted glass: the group's shadow is `layer-color`, so the glass
+    /// keeps its own colour (multiplies the background) instead of collapsing to
+    /// a neutral relief. Gated on the shadow kind — verified on a synthetic
+    /// two-group fixture: flipping the shadow to `none`/`neutral` strips the
+    /// colour to grey, and overlapping tinted groups stack their multiplies.
+    tinted: bool,
     /// Opaque glass with a specular sheen: keeps its colour but gets a raised
     /// rim highlight (KYA's coffee cup). `glass` + specular, translucency off.
     specular: bool,
@@ -528,12 +534,15 @@ fn collect_stack_layers(
             // group's specular is on (KYA's cup).
             let is_glass = explicit || (glass_context && !opted_out);
             let frosted = is_glass && eff.translucency.enabled;
+            let tinted = frosted
+                && eff.shadow.kind == crate::icon_effects::ShadowKind::LayerColor;
             let specular = is_glass && !eff.translucency.enabled && eff.specular;
             let (native_w, native_h) = layer_native_size(&path);
             // Compose group∘layer, then map to canvas pixels by the base scale.
             out.push(StackLayer {
                 source: path,
                 frosted,
+                tinted,
                 specular,
                 scale: LAYER_BASE_SCALE * gscale * lscale,
                 tx: LAYER_BASE_SCALE * (gscale * ltx + gtx),
@@ -689,11 +698,14 @@ fn render_layer_stack(
     let n = w * w;
     let mut rgba = vec![0u8; n * 4];
     let mut glass_cov = vec![0u8; n];
-    // Colour of the frosted layer at each covered pixel (topmost / strongest
-    // coverage wins). The frosted region multiplies the background gradient by
-    // this colour, so a saturated glass slab (Rectangle's blue Overlay) keeps
-    // its hue instead of collapsing to a neutral relief.
-    let mut glass_rgb = vec![[0u8; 3]; n];
+    // Per-pixel multiplicative tint the frosted region applies to the
+    // background gradient (init 1 = no tint). Each *tinted* frosted layer
+    // (group shadow `layer-color`) folds its colour in by coverage-weighted
+    // multiply, so a saturated slab keeps its hue and two overlapping tinted
+    // groups stack (bg × blue × red → the purple overlap Apple emits). A plain
+    // frosted layer (shadow none/neutral) leaves the tint at 1 and only
+    // contributes the neutral relief darkening.
+    let mut glass_tint = vec![[1.0f32; 3]; n];
     let mut spec_cov = vec![0u8; n];
     let mut any_glass = false;
     let mut any_specular = false;
@@ -729,10 +741,17 @@ fn render_layer_stack(
                 let ci = (cy * w as i64 + cx) as usize;
                 if layer.frosted {
                     any_glass = true;
-                    if sa >= glass_cov[ci] {
-                        glass_rgb[ci] = [src[si], src[si + 1], src[si + 2]];
-                    }
                     glass_cov[ci] = glass_cov[ci].max(sa);
+                    if layer.tinted {
+                        // Coverage-weighted multiply: fold this layer's colour
+                        // into the running tint (lerp 1→colour by alpha), so
+                        // anti-aliased edges fade and overlaps compound.
+                        let cov = sa as f32 / 255.0;
+                        for c in 0..3 {
+                            let col = src[si + c] as f32 / 255.0;
+                            glass_tint[ci][c] *= 1.0 - cov + cov * col;
+                        }
+                    }
                 } else {
                     let mut dst =
                         [rgba[ci * 4], rgba[ci * 4 + 1], rgba[ci * 4 + 2], rgba[ci * 4 + 3]];
@@ -774,17 +793,17 @@ fn render_layer_stack(
                 let a = (cov * 255.0).round() as u8;
                 let glass_px = match gradient {
                     // Frosted glass multiplies the gradient it sits over by the
-                    // layer's colour (Rectangle's blue Overlay → bg × blue; a
-                    // light/neutral layer → ≈bg, matching the old relief), then
-                    // applies the slight vertical relief darkening. We bake
-                    // bg × tint as an opaque pixel; drawn over the same gradient
-                    // by the compositor this reproduces a multiply blend.
+                    // accumulated tint (1 where only neutral glass, so ≈bg with
+                    // the slight relief darkening; the folded layer colours where
+                    // `layer-color` glass tints it), then applies the vertical
+                    // relief. We bake bg × tint as an opaque pixel; drawn over
+                    // the same gradient by the compositor this reproduces a
+                    // multiply blend.
                     Some(g) => {
                         let bg = g.sample(x as u32, y as u32, pixel_size);
                         let mut out = [0u8; 4];
                         for c in 0..3 {
-                            let tint = glass_rgb[i][c] as f32 / 255.0;
-                            let v = bg[c] as f32 * tint * (1.0 - strength);
+                            let v = bg[c] as f32 * glass_tint[i][c] * (1.0 - strength);
                             out[c] = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
                         }
                         out[3] = a;
@@ -1328,12 +1347,39 @@ fn build_icon_car(
         && !layer_assets.is_empty()
         && !gradient_assets.is_empty();
     if layered {
-        let group_facet = &group_facet_names[0];
-        let group_ident = hash_name(group_facet);
         let main_ident = hash_name(icon_name);
         let stack_name = format!("{icon_name}.iconstack");
-        let layer_asset = &layer_assets[0];
-        let layer_ident = hash_name(&layer_asset.facet_name);
+        // Each group becomes a PART_ICON_GROUP facet whose IconGroup rendition
+        // references that group's own image layers (PART_REGULAR). Previously
+        // only the first group was wired, so a second group's facet had a
+        // FACETKEYS entry but no rendition — absent from BITMAPKEYS, it made
+        // CUICatalog return "no images" (Rectangle's Overlay facet). Build the
+        // per-group ident + layer refs so every group resolves.
+        let group_infos: Vec<(u16, Vec<car::LayerRef>)> = group_facet_names
+            .iter()
+            .zip(groups.iter())
+            .map(|(facet, g)| {
+                let ident = hash_name(facet);
+                let layer_refs: Vec<car::LayerRef> = g
+                    .layers
+                    .iter()
+                    .filter(|l| l.hidden != Some(true))
+                    .filter_map(|l| {
+                        let img = l.image_name.as_deref()?;
+                        let stem = std::path::Path::new(img)
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(img);
+                        Some(car::LayerRef {
+                            part: car::PART_REGULAR,
+                            identifier: hash_name(&format!("{icon_name}_Assets/{stem}")),
+                        })
+                    })
+                    .collect();
+                (ident, layer_refs)
+            })
+            .filter(|(_, refs)| !refs.is_empty())
+            .collect();
         // Map appearance ID -> gradient facet name. 1=DarkAqua uses the
         // second (dark) gradient; 8=Aqua and 10=Tintable use the first.
         let grad1_ident = hash_name(&gradient_assets[0].facet_name);
@@ -1345,20 +1391,20 @@ fn build_icon_car(
         );
         for appearance in [1u16, 8, 10] {
             let grad_id = if appearance == 1 { grad2_ident } else { grad1_ident };
-            let stack_csi = car::build_iconstack_csi(
-                &stack_name,
-                1024,
-                &[
-                    car::LayerRef {
-                        part: car::PART_ICON_GRADIENT,
-                        identifier: grad_id,
-                    },
-                    car::LayerRef {
-                        part: car::PART_ICON_GROUP,
-                        identifier: group_ident,
-                    },
-                ],
-            );
+            // Stack the gradient at the bottom, then the groups back-to-front.
+            // icon.json lists groups front-to-back (index 0 topmost), so the
+            // painter's order reverses them.
+            let mut stack_layers = vec![car::LayerRef {
+                part: car::PART_ICON_GRADIENT,
+                identifier: grad_id,
+            }];
+            for (ident, _) in group_infos.iter().rev() {
+                stack_layers.push(car::LayerRef {
+                    part: car::PART_ICON_GROUP,
+                    identifier: *ident,
+                });
+            }
+            let stack_csi = car::build_iconstack_csi(&stack_name, 1024, &stack_layers);
             renditions.push(Rendition {
                 name: stack_name.clone(),
                 identifier: main_ident,
@@ -1379,33 +1425,28 @@ fn build_icon_car(
                 ..Rendition::default()
             });
 
-            let group_csi = car::build_icongroup_csi(
-                "IconGroup",
-                1024,
-                &[car::LayerRef {
-                    part: car::PART_REGULAR,
-                    identifier: layer_ident,
-                }],
-            );
-            renditions.push(Rendition {
-                name: "IconGroup".to_string(),
-                identifier: group_ident,
-                element: car::ELEMENT_UNIVERSAL,
-                part: car::PART_ICON_GROUP,
-                scale: 1,
-                appearance,
-                width: 0,
-                height: 0,
-                pixel_data: Vec::new(),
-                pixel_format: *car::PIXELFMT_DATA,
-                layout: car::LAYOUT_ICON_GROUP,
-                keyformat: placeholder_kf.clone(),
-                min_deploy: min_deploy.to_string(),
-                platform: platform.to_string(),
-                colorspace_id: 0,
-                csi_override: Some(group_csi),
-                ..Rendition::default()
-            });
+            for (group_ident, layer_refs) in &group_infos {
+                let group_csi = car::build_icongroup_csi("IconGroup", 1024, layer_refs);
+                renditions.push(Rendition {
+                    name: "IconGroup".to_string(),
+                    identifier: *group_ident,
+                    element: car::ELEMENT_UNIVERSAL,
+                    part: car::PART_ICON_GROUP,
+                    scale: 1,
+                    appearance,
+                    width: 0,
+                    height: 0,
+                    pixel_data: Vec::new(),
+                    pixel_format: *car::PIXELFMT_DATA,
+                    layout: car::LAYOUT_ICON_GROUP,
+                    keyformat: placeholder_kf.clone(),
+                    min_deploy: min_deploy.to_string(),
+                    platform: platform.to_string(),
+                    colorspace_id: 0,
+                    csi_override: Some(group_csi),
+                    ..Rendition::default()
+                });
+            }
         }
     }
 
@@ -2275,7 +2316,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let red = dir.join("red.png");
         write_solid_png(&red, [255, 0, 0, 255]);
-        let layers = vec![StackLayer { source: red, frosted: true, specular: false, scale: 1.0, tx: 0.0, ty: 0.0, opacity: 1.0, blend: BlendMode::Normal, native_w: 64, native_h: 64 }];
+        let layers = vec![StackLayer { source: red, frosted: true, tinted: false, specular: false, scale: 1.0, tx: 0.0, ty: 0.0, opacity: 1.0, blend: BlendMode::Normal, native_w: 64, native_h: 64 }];
         let out = render_layer_stack(&layers, 64, None).unwrap();
         let i = (32 * 64 + 32) * 4; // centre, premul-first BGRA
         let (b, g, r, a) = (out[i], out[i + 1], out[i + 2], out[i + 3]);
@@ -2289,10 +2330,63 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let red = dir.join("red2.png");
         write_solid_png(&red, [255, 0, 0, 255]);
-        let layers = vec![StackLayer { source: red, frosted: false, specular: false, scale: 1.0, tx: 0.0, ty: 0.0, opacity: 1.0, blend: BlendMode::Normal, native_w: 64, native_h: 64 }];
+        let layers = vec![StackLayer { source: red, frosted: false, tinted: false, specular: false, scale: 1.0, tx: 0.0, ty: 0.0, opacity: 1.0, blend: BlendMode::Normal, native_w: 64, native_h: 64 }];
         let out = render_layer_stack(&layers, 64, None).unwrap();
         let i = (32 * 64 + 32) * 4; // premul-first BGRA, opaque red
         assert_eq!((out[i], out[i + 1], out[i + 2], out[i + 3]), (0, 0, 255, 255));
+    }
+
+    #[test]
+    fn tinted_glass_multiplies_gradient_and_stacks() {
+        // Tinted frosted glass (group shadow `layer-color`) multiplies the
+        // background gradient by its colour; two overlapping tinted layers stack
+        // their multiplies (bg × blue × red). A frosted-but-untinted layer
+        // leaves the background un-tinted (neutral relief only).
+        let dir = std::env::temp_dir().join(format!("tint_t_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let blue = dir.join("blue.png");
+        let red = dir.join("red3.png");
+        write_solid_png(&blue, [0, 51, 229, 255]);
+        write_solid_png(&red, [229, 25, 0, 255]);
+        // Constant grey 0.6 gradient so the sampled background is ≈153 anywhere.
+        let grad = crate::icon_render::GradientFill {
+            start_rgb: [0.6, 0.6, 0.6],
+            stop_rgb: [0.6, 0.6, 0.6],
+            start: [0.5, 0.0],
+            stop: [0.5, 1.0],
+        };
+        let mk = |src: &Path, tinted: bool| StackLayer {
+            source: src.to_path_buf(),
+            frosted: true,
+            tinted,
+            specular: false,
+            scale: 1.0,
+            tx: 0.0,
+            ty: 0.0,
+            opacity: 1.0,
+            blend: BlendMode::Normal,
+            native_w: 64,
+            native_h: 64,
+        };
+        let i = (32 * 64 + 32) * 4; // centre, premul-first BGRA (opaque → straight)
+        // One tinted blue layer: blue channel survives, red ≈ stripped.
+        let single = render_layer_stack(&[mk(&blue, true)], 64, Some(&grad)).unwrap();
+        let (b1, g1, r1) = (single[i], single[i + 1], single[i + 2]);
+        assert!(b1 > 100 && r1 < 20, "blue tint: B high R low, got {r1},{g1},{b1}");
+        // Blue over red: stacked multiply → both channels collapse, far darker.
+        let stacked =
+            render_layer_stack(&[mk(&blue, true), mk(&red, true)], 64, Some(&grad)).unwrap();
+        assert!(
+            stacked[i] < b1 && stacked[i + 1] < g1,
+            "overlap must be darker than either single tint"
+        );
+        // Untinted frosted layer leaves the grey background (only relief).
+        let neutral = render_layer_stack(&[mk(&blue, false)], 64, Some(&grad)).unwrap();
+        let (b, g, r) = (neutral[i], neutral[i + 1], neutral[i + 2]);
+        assert!(
+            b.abs_diff(g) < 6 && g.abs_diff(r) < 6 && g > 130,
+            "untinted glass stays grey, got {r},{g},{b}"
+        );
     }
 
     #[test]
@@ -2306,6 +2400,7 @@ mod tests {
         let layers = vec![StackLayer {
             source: red,
             frosted: false,
+            tinted: false,
             specular: false,
             scale: LAYER_BASE_SCALE,
             tx: 0.0,
