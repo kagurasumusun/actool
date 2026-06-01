@@ -420,15 +420,25 @@ fn validate_layer_image_refs(bundle: &Path, json: &serde_json::Value) -> Result<
     Ok(())
 }
 
-/// One layer in render order: its rasterizable source and whether it is a
-/// glass layer for the appearance being rendered.
+/// The layer image at `scale = 1` is drawn into the icon's content area — the
+/// 824/1024 squircle inset, measured from tagspaces (a non-glass positioned
+/// layer). `position.scale` multiplies it and `translation-in-points` (in this
+/// same scaled space) shifts it.
+const LAYER_BASE_SCALE: f32 = 824.0 / 1024.0;
+
+/// One layer in render order: its rasterizable source, glass flag, and the
+/// affine placement (scale + translation in 1024-canvas pixels) resolved from
+/// the group and layer `position`.
 struct StackLayer {
     source: PathBuf,
     glass: bool,
+    scale: f32,
+    tx: f32,
+    ty: f32,
 }
 
-/// Resolve each visible layer's source path + glass flag (light appearance),
-/// in document order, for the layer-stack compositor.
+/// Resolve each visible layer's source path, glass flag, and placement (light
+/// appearance), in document order, for the layer-stack compositor.
 fn collect_stack_layers(bundle: &Path, parsed: &IconJson) -> Vec<StackLayer> {
     use crate::icon_effects::{resolve_icon_effects, Appearance};
     let mut out = Vec::new();
@@ -441,6 +451,14 @@ fn collect_stack_layers(bundle: &Path, parsed: &IconJson) -> Vec<StackLayer> {
         let glass_context = eff.translucency.enabled
             || eff.blur_material.is_some()
             || eff.layers.iter().any(|l| l.glass);
+        let (gscale, gtx, gty) = group
+            .position
+            .as_ref()
+            .map(|p| {
+                let t = p.translation_in_points.unwrap_or([0.0, 0.0]);
+                (p.scale.unwrap_or(1.0), t[0], t[1])
+            })
+            .unwrap_or((1.0, 0.0, 0.0));
         for (i, layer) in group.layers.iter().enumerate() {
             if layer.hidden == Some(true) {
                 continue;
@@ -454,9 +472,21 @@ fn collect_stack_layers(bundle: &Path, parsed: &IconJson) -> Vec<StackLayer> {
             let explicit = eff.layers.get(i).map(|l| l.glass).unwrap_or(false);
             let opted_out =
                 layer.glass == Some(false) && layer.glass_specializations.is_none();
+            let (lscale, ltx, lty) = layer
+                .position
+                .as_ref()
+                .map(|p| {
+                    let t = p.translation_in_points.unwrap_or([0.0, 0.0]);
+                    (p.scale.unwrap_or(1.0), t[0], t[1])
+                })
+                .unwrap_or((1.0, 0.0, 0.0));
+            // Compose group∘layer, then map to canvas pixels by the base scale.
             out.push(StackLayer {
                 source: path,
                 glass: explicit || (glass_context && !opted_out),
+                scale: LAYER_BASE_SCALE * gscale * lscale,
+                tx: LAYER_BASE_SCALE * (gscale * ltx + gtx),
+                ty: LAYER_BASE_SCALE * (gscale * lty + gty),
             });
         }
     }
@@ -519,21 +549,41 @@ fn render_layer_stack(layers: &[StackLayer], pixel_size: u32) -> Result<Vec<u8>>
     let mut rgba = vec![0u8; n * 4];
     let mut glass_cov = vec![0u8; n];
     let mut any_glass = false;
+    let f = pixel_size as f32 / 1024.0;
     for layer in layers {
-        let src = rasterize_layer(&layer.source, pixel_size)?;
-        if src.len() != n * 4 {
-            continue;
-        }
-        if layer.glass {
-            any_glass = true;
-            for i in 0..n {
-                glass_cov[i] = glass_cov[i].max(src[i * 4 + 3]);
+        // Rasterize the layer at its scaled size and blit it onto the canvas
+        // centred + translated per its resolved placement.
+        let target = ((layer.scale * pixel_size as f32).round() as u32).max(1);
+        let src = rasterize_layer(&layer.source, target)?;
+        let ts = target as i64;
+        let half = pixel_size as f32 / 2.0;
+        let ox = (half + layer.tx * f - target as f32 / 2.0).round() as i64;
+        let oy = (half + layer.ty * f - target as f32 / 2.0).round() as i64;
+        for ly in 0..ts {
+            let cy = oy + ly;
+            if cy < 0 || cy >= w as i64 {
+                continue;
             }
-        } else {
-            for i in 0..n {
-                let mut dst = [rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], rgba[i * 4 + 3]];
-                over(&mut dst, &src[i * 4..i * 4 + 4]);
-                rgba[i * 4..i * 4 + 4].copy_from_slice(&dst);
+            for lx in 0..ts {
+                let cx = ox + lx;
+                if cx < 0 || cx >= w as i64 {
+                    continue;
+                }
+                let si = ((ly * ts + lx) * 4) as usize;
+                let sa = src[si + 3];
+                if sa == 0 {
+                    continue;
+                }
+                let ci = (cy * w as i64 + cx) as usize;
+                if layer.glass {
+                    any_glass = true;
+                    glass_cov[ci] = glass_cov[ci].max(sa);
+                } else {
+                    let mut dst =
+                        [rgba[ci * 4], rgba[ci * 4 + 1], rgba[ci * 4 + 2], rgba[ci * 4 + 3]];
+                    over(&mut dst, &src[si..si + 4]);
+                    rgba[ci * 4..ci * 4 + 4].copy_from_slice(&dst);
+                }
             }
         }
     }
@@ -1975,7 +2025,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let red = dir.join("red.png");
         write_solid_png(&red, [255, 0, 0, 255]);
-        let layers = vec![StackLayer { source: red, glass: true }];
+        let layers = vec![StackLayer { source: red, glass: true, scale: 1.0, tx: 0.0, ty: 0.0 }];
         let out = render_layer_stack(&layers, 64).unwrap();
         let i = (32 * 64 + 32) * 4; // centre, premul-first BGRA
         let (b, g, r, a) = (out[i], out[i + 1], out[i + 2], out[i + 3]);
@@ -1989,7 +2039,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let red = dir.join("red2.png");
         write_solid_png(&red, [255, 0, 0, 255]);
-        let layers = vec![StackLayer { source: red, glass: false }];
+        let layers = vec![StackLayer { source: red, glass: false, scale: 1.0, tx: 0.0, ty: 0.0 }];
         let out = render_layer_stack(&layers, 64).unwrap();
         let i = (32 * 64 + 32) * 4; // premul-first BGRA, opaque red
         assert_eq!((out[i], out[i + 1], out[i + 2], out[i + 3]), (0, 0, 255, 255));

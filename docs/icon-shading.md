@@ -101,6 +101,17 @@ how the stored geometry orders its endpoints (feishin's `[0.5,1]→[0.5,0.3]` is
 unchanged; scrumdinger/automatic `[0.5,0]→[0.5,1]` was rendering upside down).
 element-web (non-glass) keeps full colour; only its frame flips white-to-top.
 
+**Layer position — implemented.** `render_layer_stack` places each layer with
+its resolved affine transform instead of drawing it 1:1. A `scale = 1` layer is
+drawn into the icon content area (824/1024 of the canvas — `LAYER_BASE_SCALE`);
+`position.scale` multiplies it and `translation-in-points` (in that same scaled
+space) shifts it, with the group's `position` composed over the layer's
+(`scale = base·gscale·lscale`, `tx = base·(gscale·ltx + gtx)`). Reverse-
+engineered against tagspaces (a non-glass positioned layer): with the base scale
+our layer lands at 1.004× Apple's size, centre within ~1px (mean ≈6 luma over
+the icon). element-web (no position) now insets its layer to y[182,922] like
+Apple instead of filling the canvas.
+
 **Specular / translucency / blur — not rendered yet.** Parameters resolved and
 ready. `specular` still has no light-mode fixture to measure (feishin enables it
 only for `tinted`); translucency/blur are folded into the glass approximation's

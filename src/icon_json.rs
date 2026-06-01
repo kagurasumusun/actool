@@ -42,6 +42,8 @@ pub struct Group {
     #[serde(default)]
     pub hidden: Option<bool>,
     #[serde(default)]
+    pub position: Option<Position>,
+    #[serde(default)]
     pub layers: Vec<Layer>,
     #[serde(default)]
     pub shadow: Option<Shadow>,
