@@ -120,10 +120,21 @@ opacity scales the source alpha. Because blend modes differ between appearances
 rendered **per appearance** — the primary variant uses the light stack, the
 alternate the dark one. Glass layers ignore blend/opacity (they become relief).
 
-**Specular / translucency / blur — not rendered yet.** Parameters resolved and
-ready. `specular` still has no light-mode fixture to measure (feishin enables it
-only for `tinted`); translucency/blur are folded into the glass approximation's
-constants rather than applied independently. See `docs/icon-bundle-parity.md`.
+**Translucency gates the glass mode; specular — implemented.** A glass layer is
+*frosted* (the faint see-through relief) only when translucency is **enabled**
+(scrumdinger). With translucency **disabled** it is **opaque** glass: the layer
+keeps its colour (blacks lifted toward a grey floor ≈45/255 — the glass
+material) and, when the group's `specular` is on, gets a directional sheen —
+`apply_specular` brightens top-facing edges of the layer and shadows
+bottom-facing ones (light from the top), the raised "liquid glass" rim.
+Reverse-engineered against KeepingYouAwake (a non-variant `specular: true` glass
+icon): our coffee cup matches Apple's — body lum 39 vs 45, rim-highlight peak
+209 vs 209. (Its layer is still offset by an unrelated SVG content-centring
+gap.) feishin's specular is `tinted`-only, so it stays unrendered there.
+
+**Blur-material / lighting / per-region glass detail — not rendered.**
+Parameters resolved; these remain the proprietary shaders. See
+`docs/icon-bundle-parity.md`.
 
 > The transmission fixture (deep multi-group SVG icon) exercises `screen`/
 > `overlay` blends but also hits unrelated SVG-layer rendering gaps, so it isn't

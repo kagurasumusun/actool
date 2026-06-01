@@ -435,12 +435,21 @@ fn validate_layer_image_refs(bundle: &Path, json: &serde_json::Value) -> Result<
 /// same scaled space) shifts it.
 const LAYER_BASE_SCALE: f32 = 824.0 / 1024.0;
 
+/// Grey floor an opaque-glass layer's blacks are lifted toward (measured on
+/// KYA's cup body, lum ≈ 45/255).
+const GLASS_FLOOR: f32 = 45.0 / 255.0;
+
 /// One layer in render order: its rasterizable source, glass flag, and the
 /// affine placement (scale + translation in 1024-canvas pixels) resolved from
 /// the group and layer `position`.
 struct StackLayer {
     source: PathBuf,
-    glass: bool,
+    /// Frosted glass (glass + translucency enabled): drawn as a faint
+    /// see-through relief rather than in its own colour.
+    frosted: bool,
+    /// Opaque glass with a specular sheen: keeps its colour but gets a raised
+    /// rim highlight (KYA's coffee cup). `glass` + specular, translucency off.
+    specular: bool,
     scale: f32,
     tx: f32,
     ty: f32,
@@ -501,10 +510,17 @@ fn collect_stack_layers(
                 .get(i)
                 .map(|l| (l.opacity, parse_blend(&l.blend_mode)))
                 .unwrap_or((1.0, BlendMode::Normal));
+            // Translucency decides the glass mode: enabled → frosted relief
+            // (see-through), disabled → opaque, with a specular sheen when the
+            // group's specular is on (KYA's cup).
+            let is_glass = explicit || (glass_context && !opted_out);
+            let frosted = is_glass && eff.translucency.enabled;
+            let specular = is_glass && !eff.translucency.enabled && eff.specular;
             // Compose group∘layer, then map to canvas pixels by the base scale.
             out.push(StackLayer {
                 source: path,
-                glass: explicit || (glass_context && !opted_out),
+                frosted,
+                specular,
                 scale: LAYER_BASE_SCALE * gscale * lscale,
                 tx: LAYER_BASE_SCALE * (gscale * ltx + gtx),
                 ty: LAYER_BASE_SCALE * (gscale * lty + gty),
@@ -634,7 +650,9 @@ fn render_layer_stack(layers: &[StackLayer], pixel_size: u32) -> Result<Vec<u8>>
     let n = w * w;
     let mut rgba = vec![0u8; n * 4];
     let mut glass_cov = vec![0u8; n];
+    let mut spec_cov = vec![0u8; n];
     let mut any_glass = false;
+    let mut any_specular = false;
     let f = pixel_size as f32 / 1024.0;
     for layer in layers {
         // Rasterize the layer at its scaled size and blit it onto the canvas
@@ -662,15 +680,29 @@ fn render_layer_stack(layers: &[StackLayer], pixel_size: u32) -> Result<Vec<u8>>
                     continue;
                 }
                 let ci = (cy * w as i64 + cx) as usize;
-                if layer.glass {
+                if layer.frosted {
                     any_glass = true;
                     glass_cov[ci] = glass_cov[ci].max(sa);
                 } else {
                     let mut dst =
                         [rgba[ci * 4], rgba[ci * 4 + 1], rgba[ci * 4 + 2], rgba[ci * 4 + 3]];
-                    let s = [src[si], src[si + 1], src[si + 2], sa];
+                    // Opaque glass lifts the layer's blacks toward a grey floor
+                    // (≈45/255 on KYA's cup) — screen each channel with it.
+                    let s = if layer.specular {
+                        let lift = |c: u8| {
+                            let c = c as f32 / 255.0;
+                            ((c + GLASS_FLOOR - c * GLASS_FLOOR) * 255.0).round() as u8
+                        };
+                        [lift(src[si]), lift(src[si + 1]), lift(src[si + 2]), sa]
+                    } else {
+                        [src[si], src[si + 1], src[si + 2], sa]
+                    };
                     composite_blend(&mut dst, &s, layer.blend);
                     rgba[ci * 4..ci * 4 + 4].copy_from_slice(&dst);
+                    if layer.specular {
+                        any_specular = true;
+                        spec_cov[ci] = spec_cov[ci].max(sa);
+                    }
                 }
             }
         }
@@ -696,6 +728,9 @@ fn render_layer_stack(layers: &[StackLayer], pixel_size: u32) -> Result<Vec<u8>>
             }
         }
     }
+    if any_specular {
+        apply_specular(&mut rgba, &spec_cov, w);
+    }
     // Straight RGBA → premultiplied-first BGRA.
     let mut out = vec![0u8; n * 4];
     for i in 0..n {
@@ -707,6 +742,42 @@ fn render_layer_stack(layers: &[StackLayer], pixel_size: u32) -> Result<Vec<u8>>
         out[i * 4 + 3] = a;
     }
     Ok(out)
+}
+
+/// Add a directional specular sheen to opaque-glass coverage `cov`: top-facing
+/// edges get a soft white highlight, bottom-facing edges a slight shadow — the
+/// raised "liquid glass" rim (KYA's cup). Light comes from the top, so the sign
+/// of the vertical coverage gradient picks highlight vs shadow.
+fn apply_specular(rgba: &mut [u8], cov: &[u8], w: usize) {
+    let d = ((w as f32 * 22.0 / 1024.0).round() as i64).max(1);
+    const HI: f32 = 0.55;
+    const LO: f32 = 0.30;
+    let wi = w as i64;
+    for y in 0..wi {
+        for x in 0..wi {
+            let i = (y * wi + x) as usize;
+            if cov[i] == 0 {
+                continue;
+            }
+            let at = |yy: i64| {
+                if yy >= 0 && yy < wi {
+                    cov[(yy * wi + x) as usize] as f32 / 255.0
+                } else {
+                    0.0
+                }
+            };
+            // >0 where coverage is heavier below than above → a top-facing edge.
+            let g = at(y + d) - at(y - d);
+            if g.abs() < 0.02 {
+                continue;
+            }
+            let delta = g * if g > 0.0 { HI } else { LO } * 255.0;
+            for c in 0..3 {
+                let v = rgba[i * 4 + c] as f32 + delta;
+                rgba[i * 4 + c] = v.round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
 }
 
 fn find_all_source_images(bundle: &Path, json: &serde_json::Value) -> Vec<PathBuf> {
@@ -2101,6 +2172,27 @@ mod tests {
         assert_ne!(b, c);
     }
 
+    #[test]
+    fn specular_brightens_top_edge_darkens_bottom() {
+        // A mid-grey filled band: its top edge should brighten, bottom darken.
+        let w = 128;
+        let mut rgba = vec![100u8; w * w * 4];
+        let mut cov = vec![0u8; w * w];
+        for y in 40..88 {
+            for x in 20..108 {
+                cov[y * w + x] = 255;
+                for c in 0..4 {
+                    rgba[(y * w + x) * 4 + c] = if c == 3 { 255 } else { 100 };
+                }
+            }
+        }
+        apply_specular(&mut rgba, &cov, w);
+        let lum = |y: usize| rgba[(y * w + 64) * 4] as i32; // centre column
+        // The emboss acts within a few px of each horizontal boundary.
+        assert!(lum(41) > 130, "top edge should brighten, got {}", lum(41));
+        assert!(lum(86) < 80, "bottom edge should darken, got {}", lum(86));
+    }
+
     fn palette(json: &str) -> (Vec<ColorAsset>, Vec<GradientAsset>) {
         let parsed = crate::icon_json::IconJson::parse(json).unwrap();
         fill_specializations_assets("X", &parsed)
@@ -2120,7 +2212,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let red = dir.join("red.png");
         write_solid_png(&red, [255, 0, 0, 255]);
-        let layers = vec![StackLayer { source: red, glass: true, scale: 1.0, tx: 0.0, ty: 0.0, opacity: 1.0, blend: BlendMode::Normal }];
+        let layers = vec![StackLayer { source: red, frosted: true, specular: false, scale: 1.0, tx: 0.0, ty: 0.0, opacity: 1.0, blend: BlendMode::Normal }];
         let out = render_layer_stack(&layers, 64).unwrap();
         let i = (32 * 64 + 32) * 4; // centre, premul-first BGRA
         let (b, g, r, a) = (out[i], out[i + 1], out[i + 2], out[i + 3]);
@@ -2134,7 +2226,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let red = dir.join("red2.png");
         write_solid_png(&red, [255, 0, 0, 255]);
-        let layers = vec![StackLayer { source: red, glass: false, scale: 1.0, tx: 0.0, ty: 0.0, opacity: 1.0, blend: BlendMode::Normal }];
+        let layers = vec![StackLayer { source: red, frosted: false, specular: false, scale: 1.0, tx: 0.0, ty: 0.0, opacity: 1.0, blend: BlendMode::Normal }];
         let out = render_layer_stack(&layers, 64).unwrap();
         let i = (32 * 64 + 32) * 4; // premul-first BGRA, opaque red
         assert_eq!((out[i], out[i + 1], out[i + 2], out[i + 3]), (0, 0, 255, 255));
