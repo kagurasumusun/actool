@@ -33,8 +33,9 @@ byte-identical `.car`.
 * **Main facet part** is `PART_ICON` (220), as Apple emits, not
   `PART_ICON_COMPOSER` (245).
 * **`imagesWithName:` / `colorWithName:` behaviour** matches Apple's own
-  output: feishin reports 12 OK / 2 FAIL via `validate_car` — the same 2
-  facets (the IconGroup and the SVG Vector) that fail in Apple's `.car` too.
+  output: feishin reports 12 OK / 2 SKIP via `validate_car` — the same 2
+  non-raster facets (the IconGroup and the SVG Vector) that return no bitmaps
+  in Apple's `.car` too (SKIP, not a failure — they aren't bitmap-resolvable).
 
 ### fill-specializations palette model
 
@@ -125,5 +126,5 @@ content now matches.
   --minimum-deployment-target 11.0 --app-icon feishin \
   --output-partial-info-plist ref/p.plist third_party/feishin/media/feishin.icon
 python3 tools/compare_car.py out/Assets.car ref/Assets.car   # structural diff
-./tools/validate_car out/Assets.car                          # 12 OK / 2 FAIL
+./tools/validate_car out/Assets.car                          # 12 OK / 2 SKIP
 ```
