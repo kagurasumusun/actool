@@ -1658,11 +1658,18 @@ fn resolve_gradient_fill(
     // scrumdinger/automatic [0.5,0.0]→[0.5,1.0] would otherwise render upside
     // down. Anchor the first stop to the higher y, preserving the spread.
     let (top_y, bot_y) = (g[1].max(g[3]), g[1].min(g[3]));
+    // Apple lays the gradient axis inside the same content box layers use: the
+    // normalized [0,1] orientation is inset by LAYER_BASE_SCALE about the
+    // centre, so a default top→bottom gradient spans canvas y ≈ [181,843], not
+    // the full squircle [100,924]. Measured on a black→white probe (gradient
+    // span 662 px = 824·LAYER_BASE_SCALE, centred); applies to x too for
+    // diagonal gradients.
+    let inset = |p: f32| 0.5 + (p - 0.5) * LAYER_BASE_SCALE;
     Some(crate::icon_render::GradientFill {
         start_rgb,
         stop_rgb,
-        start: [g[0], top_y],
-        stop: [g[2], bot_y],
+        start: [inset(g[0]), inset(top_y)],
+        stop: [inset(g[2]), inset(bot_y)],
     })
 }
 

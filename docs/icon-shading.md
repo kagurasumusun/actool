@@ -122,10 +122,18 @@ This replaced an earlier coincidental full-multiply (`k=1`) that only fit
 Rectangle's dark background. The subtractive `D` reproduces Apple's tint at any
 background automatically: Rectangle's right-mid lands `[15,66,103]` vs Apple
 `[7,67,104]` (was `[0,54,97]`). The blue Overlay went from a near-uniform grey
-(mean diff 16.3) to a recognisable blue right-half over a grey left-half (≈12);
-the residual is the device-RGB vs Apple-space gradient interpolation showing
-through the tint, top-to-bottom — the standing ≈6/luma gradient gap, not the tint
-strength (now measured exactly).
+(mean diff 16.3) to a recognisable blue right-half over a grey left-half (≈12).
+
+**Background gradient — geometry, not colour space.** A black→white probe
+(`tools/probe_gradient_space.py`) showed Apple interpolates the gradient in the
+same component-linear space we do (midpoint 127 vs our 128; the suspected
+"device-RGB vs Apple's space" was a misdiagnosis). The residual was that Apple
+**insets the gradient axis by `LAYER_BASE_SCALE` about the centre** — a default
+top→bottom gradient spans canvas y ≈ [181,843] (span 662 = 824·`LAYER_BASE_SCALE`),
+the same content box layers occupy, not the full squircle. `resolve_gradient_fill`
+now applies that inset, dropping the black→white probe from 14→2/luma and
+element-web to ≈0.8/luma mean. The remaining gradient residual is a thin (~30 px)
+bright highlight at the squircle's very top edge.
 
 **Layer placement (`LAYER_BASE_SCALE`) is verified correct** — not a gap. A
 marker-based sweep (`tools/probe_layer_placement.py`: 5 coloured squares at

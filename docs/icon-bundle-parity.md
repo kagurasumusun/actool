@@ -115,8 +115,15 @@ tint is a measured subtractive `D·(1−colour)` and the raised look is a measur
 σ≈19 px edge blur; see `icon-shading.md`. Layer inset/scale is also reproduced —
 the fixed `824/1024` placement is verified pixel-exact by the marker sweep; an
 earlier "Apple insets the layer slightly" suspicion was a measurement artifact.)
-The gradient stops are interpolated in device-RGB rather than Apple's space,
-leaving a residual ≈6/luma curve difference across the gradient.
+The background gradient now matches to ≈1/luma: a black→white probe
+(`tools/probe_gradient_space.py`) showed Apple interpolates in the **same**
+component-linear space we do — the old "device-RGB vs Apple's space" residual was
+a misdiagnosis. The real difference was **geometry**: Apple insets the gradient
+axis by `LAYER_BASE_SCALE` about the centre (so a default top→bottom gradient
+spans canvas y ≈ [181,843], not the full squircle), the same content box layers
+use. With that inset element-web drops to ≈0.8/luma mean. The only gradient
+residual left is a thin (~30 px) bright highlight at the squircle's very top
+edge, not yet reproduced.
 
 **Variant-axis bundles** (top-level `fill-specializations`, e.g. feishin /
 scrumdinger) store the *same* composite, just as grayscale: primary variant →
