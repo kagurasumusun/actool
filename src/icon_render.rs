@@ -338,11 +338,86 @@ pub fn composite_icon(
         }
         (s.provider_release)(provider);
 
-        let data = std::slice::from_raw_parts((s.bitmap_data)(ctx), size * size * 4).to_vec();
+        let mut data =
+            std::slice::from_raw_parts((s.bitmap_data)(ctx), size * size * 4).to_vec();
         (s.path_release)(path);
         (s.ctx_release)(ctx);
         (s.cs_release)(cs);
+        apply_icon_lighting(&mut data, size);
         Some(data)
+    }
+}
+
+#[inline]
+fn srgb_to_lin(c: f64) -> f64 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+#[inline]
+fn lin_to_srgb(c: f64) -> f64 {
+    if c <= 0.0031308 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// Signed distance to the icon squircle (rounded rect), negative inside.
+#[inline]
+fn squircle_sdf(px: f64, py: f64, center: f64, half: f64, r: f64) -> f64 {
+    let qx = (px - center).abs() - (half - r);
+    let qy = (py - center).abs() - (half - r);
+    let (ax, ay) = (qx.max(0.0), qy.max(0.0));
+    (ax * ax + ay * ay).sqrt() + qx.max(qy).min(0.0) - r
+}
+
+/// Apple's icon-frame "glass-tile" lighting: a soft white light added along the
+/// inner edge of the squircle, brightest top-left, fading inward over ~16 px.
+/// Measured (`tools/probe_icon_lighting.py`) as an additive light in *linear*
+/// space (≈constant across fills); top/left L0 ≈ 0.34, bottom/right ≈ 0.23, with
+/// a linear depth falloff. Applied to the opaque interior of the composited icon
+/// (premultiplied-first BGRA; interior α = 255, so RGB is straight there).
+fn apply_icon_lighting(data: &mut [u8], size: usize) {
+    let sz = size as f64;
+    let center = sz / 2.0;
+    let half = (sz - 2.0 * sz * MARGIN_RATIO) / 2.0;
+    let r = sz * CORNER_RATIO;
+    let depth = 16.5 * sz / 1024.0;
+    if depth < 1.0 {
+        return;
+    }
+    const L0_BASE: f64 = 0.286;
+    const L0_DIR: f64 = 0.083;
+    let sqrt2 = std::f64::consts::SQRT_2;
+    for y in 0..size {
+        for x in 0..size {
+            let i = (y * size + x) * 4;
+            if data[i + 3] < 250 {
+                continue;
+            }
+            let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
+            let dist = -squircle_sdf(px, py, center, half, r);
+            if dist < 0.0 || dist >= depth {
+                continue;
+            }
+            // Outward normal via central difference of the SDF.
+            let gx = squircle_sdf(px + 1.0, py, center, half, r)
+                - squircle_sdf(px - 1.0, py, center, half, r);
+            let gy = squircle_sdf(px, py + 1.0, center, half, r)
+                - squircle_sdf(px, py - 1.0, center, half, r);
+            let gl = (gx * gx + gy * gy).sqrt().max(1e-6);
+            let dir = (-gx / gl - gy / gl) / sqrt2; // top-left → +1
+            let l0 = L0_BASE + L0_DIR * dir;
+            let dl = l0 * (1.0 - dist / depth);
+            for c in 0..3 {
+                let lin = srgb_to_lin(data[i + c] as f64 / 255.0) + dl;
+                data[i + c] = (lin_to_srgb(lin.min(1.0)) * 255.0).round() as u8;
+            }
+        }
     }
 }
 
@@ -371,5 +446,30 @@ mod tests {
         assert_eq!(alpha(2, 2), 0, "corner must be transparent");
         // Center is inside the icon shape and opaque.
         assert_eq!(alpha(size / 2, size / 2), 255, "center must be opaque");
+    }
+
+    #[test]
+    fn icon_lighting_brightens_inner_edge() {
+        // Flat mid-grey fill: the glass-tile lighting must brighten the inner
+        // edge (top-left strongest) and leave the centre alone.
+        let size = 256u32;
+        let layer = vec![0u8; (size * size * 4) as usize];
+        let fill = GradientFill {
+            start_rgb: [0.55, 0.55, 0.55],
+            stop_rgb: [0.55, 0.55, 0.55],
+            start: [0.5, 0.0],
+            stop: [0.5, 1.0],
+        };
+        let Some(out) = composite_icon(size, &fill, &layer, None) else {
+            return; // CoreGraphics unavailable
+        };
+        let g = |x: u32, y: u32| out[((y * size + x) * 4 + 1) as usize] as i32;
+        let margin = (size as f64 * MARGIN_RATIO).round() as u32;
+        let centre = g(size / 2, size / 2);
+        let top_edge = g(size / 2, margin + 1);
+        let bot_edge = g(size / 2, size - margin - 2);
+        assert!(top_edge > centre + 5, "top inner edge should brighten ({top_edge} vs {centre})");
+        assert!(bot_edge > centre + 3, "bottom inner edge should brighten ({bot_edge} vs {centre})");
+        assert!(top_edge >= bot_edge, "top should be ≥ bottom (light from top)");
     }
 }

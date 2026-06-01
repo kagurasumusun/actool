@@ -109,17 +109,23 @@ glass shading (≈30/channel average; the shape and gradient are right). Before
 this, sized renditions were the raw layer on a full square; now non-variant
 `.icon` bundles render as proper macOS squircle icons.
 
-Not reproduced: the icon-frame **glass-tile lighting** (a bright top inner-edge
-highlight + a broad bottom inner shading). **Opaque-glass `specular` is NOT a
-gap — it is a static no-op**: a probe showed `specular: true` vs `false` are
-byte-identical (it's a live-render hint, like `lighting`), so the old
-`apply_specular` (a bright edge rim) was wrong and was removed — KYA's mean diff
-dropped 15.1→9.0. The frosted-glass tint *and* the "raised glass" soft edge
-**are** reproduced — the tint is a measured subtractive `D·(1−colour)` and the
-raised look is a measured σ≈19 px edge blur; see `icon-shading.md`. Layer
-inset/scale is also reproduced — the fixed `824/1024` placement is verified
-pixel-exact by the marker sweep; an earlier "Apple insets the layer slightly"
-suspicion was a measurement artifact.)
+Now reproduced — the icon-frame **glass-tile lighting**: a soft white light
+along the inner squircle edge, brightest top-left, fading inward ~16 px.
+Measured (`tools/probe_icon_lighting.py`, flat fills) as an additive light in
+*linear* space (≈constant across fills; all four edges brighten — the earlier
+"bottom darkening" was KYA's cup/shadow, not the frame). `apply_icon_lighting`
+reproduces Apple's edge profile (ours top +57/+43/+27 vs Apple +58/+44/+29),
+taking element-web to ≈0.5/luma. **Opaque-glass `specular` is a static no-op** (a
+probe showed `true`/`false` byte-identical — a live-render hint like `lighting`),
+so the old `apply_specular` bright rim was wrong and removed. The frosted-glass
+tint (subtractive `D·(1−colour)`), the "raised glass" σ≈19 px edge blur, and the
+fixed `824/1024` layer/gradient placement are all reproduced; see
+`icon-shading.md`.
+
+Not reproduced: the **per-layer drop shadow** (a glass layer casting a soft
+offset-down shadow on the background within the icon — KYA's cup; from
+`shadow: layer-color`), and the squircle's drop shadow into the margin is
+slightly weaker than Apple's.
 The background gradient now matches to ≈1/luma: a black→white probe
 (`tools/probe_gradient_space.py`) showed Apple interpolates in the **same**
 component-linear space we do — the old "device-RGB vs Apple's space" residual was

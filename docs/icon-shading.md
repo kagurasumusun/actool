@@ -126,6 +126,20 @@ keeps its `GLASS_FLOOR` lift (`#000000`→45, matching Apple) and is otherwise f
 The bottom-right dark rim seen on opaque glass is the group's `shadow:
 layer-color` (a per-layer drop shadow), not specular.
 
+**Icon-frame glass-tile lighting — implemented (`icon_render::apply_icon_lighting`).**
+Apple lights the icon tile with a soft white light along the inner squircle
+edge. A flat-fill probe (`tools/probe_icon_lighting.py`) showed **all four edges
+brighten** (no darkening — the earlier "bottom shading" was KYA's cup/shadow),
+as an **additive light in linear space** that is ≈constant across fills:
+top/left L0 ≈ 0.34, bottom/right ≈ 0.23 (light from top-left), with a linear
+falloff to 0 over ~16 px. `apply_icon_lighting` post-processes the composited
+icon: for interior pixels within the edge band it adds `L0·(1−d/16.5)` of white
+in linear space, where `L0 = 0.286 + 0.083·dir` and `dir = (−nx−ny)/√2` from the
+squircle SDF's outward normal. Our edge profile matches Apple's (top
++57/+43/+27 vs +58/+44/+29; bottom +42/+33/+22 vs +41/+31/+22), taking
+element-web to ≈0.5/luma and tagspaces to ≈1.6. The remaining glass gap is the
+per-layer drop shadow (KYA's cup on the background).
+
 This replaced an earlier coincidental full-multiply (`k=1`) that only fit
 Rectangle's dark background. The subtractive `D` reproduces Apple's tint at any
 background automatically: Rectangle's right-mid lands `[15,66,103]` vs Apple
