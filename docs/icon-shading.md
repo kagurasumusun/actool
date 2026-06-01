@@ -78,9 +78,21 @@ feishin output within Gaussian tolerance (sides 34/22/14/7 vs Apple
 25/18/12/7 at 5px steps; ≈35px reach). `kind: none` skips it; neutral and
 layer-color are both approximated as black.
 
-**Glass / specular / translucency / blur — not rendered yet.** Their parameters
-are resolved and ready, but none of the current fixtures exercise them visibly
-(feishin's layer is blank; element-web disables them; variant-axis bundles are
-recomposed by CUICatalog so their sized rendition isn't shown directly), so
-there is no ground truth to tune against. They need a fixture with a visible
-glass/specular layer before implementing. See `docs/icon-bundle-parity.md`.
+**Glass — implemented (approximate).** `icon_bundle::render_layer_stack`
+composites *all* a group's layers (previously only the first was used) into one
+premultiplied-first BGRA, which the compositor draws over the gradient. Glass
+layers are merged into a coverage mask and rendered as Apple's frosted relief:
+the layer colour is stripped and replaced by a near-black overlay at low opacity
+that darkens toward the bottom (concave-sphere shading). A layer is glass if it
+opts in, or if the group is a *glass context* (translucency/blur enabled, or a
+sibling is glass) and it hasn't opted out with `glass: false`. Verified against
+scrumdinger by decoding Apple's GA8: the relief lands in Apple's range (mean ≈7
+luma; centre 229 vs 232, lower 227 vs 225). The residual is Apple's
+luminance-dependent per-region shading (it lightens the body/ring and the upper
+elements), which a uniform vertical ramp can't reproduce — the proprietary part.
+element-web (non-glass) is unchanged: its layer keeps full colour.
+
+**Specular / translucency / blur — not rendered yet.** Parameters resolved and
+ready. `specular` still has no light-mode fixture to measure (feishin enables it
+only for `tinted`); translucency/blur are folded into the glass approximation's
+constants rather than applied independently. See `docs/icon-bundle-parity.md`.

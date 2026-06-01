@@ -277,6 +277,16 @@ pub fn compile_icon_bundle(
         .map(|v| !v.is_empty())
         .unwrap_or(false);
 
+    // Pre-render the full layer stack (all layers, glass shading applied) at
+    // each icon size, aligned with `icon_images`. The composite uses these
+    // instead of just the primary layer, so multi-layer icons (scrumdinger)
+    // composite correctly and glass layers become the frosted relief.
+    let stack_layers = collect_stack_layers(icon_path, &parsed);
+    let mut layer_stacks: Vec<Vec<u8>> = Vec::with_capacity(MACOS_ICON_SIZES.len());
+    for (point_size, scale) in MACOS_ICON_SIZES {
+        layer_stacks.push(render_layer_stack(&stack_layers, point_size * scale)?);
+    }
+
     let car_path = output_dir.join("Assets.car");
     build_icon_car(
         &car_path,
@@ -287,6 +297,7 @@ pub fn compile_icon_bundle(
         &color_assets,
         &gradient_assets,
         parsed.groups.first(),
+        &layer_stacks,
         emit_variant_axis,
         platform,
         min_deploy,
@@ -409,6 +420,155 @@ fn validate_layer_image_refs(bundle: &Path, json: &serde_json::Value) -> Result<
     Ok(())
 }
 
+/// One layer in render order: its rasterizable source and whether it is a
+/// glass layer for the appearance being rendered.
+struct StackLayer {
+    source: PathBuf,
+    glass: bool,
+}
+
+/// Resolve each visible layer's source path + glass flag (light appearance),
+/// in document order, for the layer-stack compositor.
+fn collect_stack_layers(bundle: &Path, parsed: &IconJson) -> Vec<StackLayer> {
+    use crate::icon_effects::{resolve_icon_effects, Appearance};
+    let mut out = Vec::new();
+    for group in &parsed.groups {
+        let eff = resolve_icon_effects(group, Appearance::Light);
+        // A "glass context" — the group has translucency/blur enabled or any
+        // sibling layer is glass — makes every layer render as glass unless it
+        // explicitly opts out (`glass: false`). scrumdinger's middle layer
+        // omits `glass` yet Apple still frosts it.
+        let glass_context = eff.translucency.enabled
+            || eff.blur_material.is_some()
+            || eff.layers.iter().any(|l| l.glass);
+        for (i, layer) in group.layers.iter().enumerate() {
+            if layer.hidden == Some(true) {
+                continue;
+            }
+            let Some(name) = layer.image_name.as_deref() else { continue };
+            let assets = bundle.join("Assets").join(name);
+            let path = if assets.exists() { assets } else { bundle.join(name) };
+            if !path.exists() {
+                continue;
+            }
+            let explicit = eff.layers.get(i).map(|l| l.glass).unwrap_or(false);
+            let opted_out =
+                layer.glass == Some(false) && layer.glass_specializations.is_none();
+            out.push(StackLayer {
+                source: path,
+                glass: explicit || (glass_context && !opted_out),
+            });
+        }
+    }
+    out
+}
+
+/// Rasterize a layer source (SVG or raster) to `pixel_size`², straight RGBA.
+fn rasterize_layer(path: &Path, pixel_size: u32) -> Result<Vec<u8>> {
+    let lower = path.to_string_lossy().to_lowercase();
+    if lower.ends_with(".svg") {
+        // CoreSVG renders premultiplied-first BGRA; unpremultiply to straight RGBA.
+        let svg = fs::read(path)?;
+        let bgra = crate::svg_raster::rasterize_svg(&svg, pixel_size, pixel_size, 1)?;
+        let mut rgba = vec![0u8; bgra.len()];
+        for (o, px) in bgra.chunks_exact(4).enumerate() {
+            let a = px[3];
+            let un = |c: u8| if a == 0 { 0 } else { ((c as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8 };
+            rgba[o * 4] = un(px[2]);
+            rgba[o * 4 + 1] = un(px[1]);
+            rgba[o * 4 + 2] = un(px[0]);
+            rgba[o * 4 + 3] = a;
+        }
+        Ok(rgba)
+    } else {
+        let img = image::open(path)?.to_rgba8();
+        let resized =
+            image::imageops::resize(&img, pixel_size, pixel_size, FilterType::Lanczos3);
+        Ok(resized.into_raw())
+    }
+}
+
+/// Straight-alpha "src over dst" on one RGBA pixel.
+fn over(dst: &mut [u8], src: &[u8]) {
+    let sa = src[3] as f32 / 255.0;
+    if sa <= 0.0 {
+        return;
+    }
+    let da = dst[3] as f32 / 255.0;
+    let oa = sa + da * (1.0 - sa);
+    if oa <= 0.0 {
+        return;
+    }
+    for c in 0..3 {
+        let s = src[c] as f32;
+        let d = dst[c] as f32;
+        dst[c] = ((s * sa + d * da * (1.0 - sa)) / oa).round().clamp(0.0, 255.0) as u8;
+    }
+    dst[3] = (oa * 255.0).round().clamp(0.0, 255.0) as u8;
+}
+
+/// Composite a group's layers into a single premultiplied-first BGRA buffer at
+/// `pixel_size`². Glass layers are not drawn in their own colour — they are
+/// merged into one coverage mask and rendered as Apple's frosted-glass relief:
+/// a near-black overlay at low opacity that darkens toward the bottom (the
+/// concave-sphere shading measured from scrumdinger, lum ≈ 232 at the centre,
+/// 225 lower, vs a white background). Non-glass layers composite normally.
+fn render_layer_stack(layers: &[StackLayer], pixel_size: u32) -> Result<Vec<u8>> {
+    let w = pixel_size as usize;
+    let n = w * w;
+    let mut rgba = vec![0u8; n * 4];
+    let mut glass_cov = vec![0u8; n];
+    let mut any_glass = false;
+    for layer in layers {
+        let src = rasterize_layer(&layer.source, pixel_size)?;
+        if src.len() != n * 4 {
+            continue;
+        }
+        if layer.glass {
+            any_glass = true;
+            for i in 0..n {
+                glass_cov[i] = glass_cov[i].max(src[i * 4 + 3]);
+            }
+        } else {
+            for i in 0..n {
+                let mut dst = [rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], rgba[i * 4 + 3]];
+                over(&mut dst, &src[i * 4..i * 4 + 4]);
+                rgba[i * 4..i * 4 + 4].copy_from_slice(&dst);
+            }
+        }
+    }
+    if any_glass {
+        for y in 0..w {
+            // Concave shading: nearly clear at the top, shadowed (darker) at
+            // the bottom. Apple's relief is luminance-dependent; we approximate
+            // it with this vertical ramp (≈delta 15 centre → 22 lower).
+            let strength = 0.02 + 0.10 * (y as f32 / w as f32);
+            for x in 0..w {
+                let i = y * w + x;
+                let cov = glass_cov[i] as f32 / 255.0;
+                if cov <= 0.0 {
+                    continue;
+                }
+                let a = (cov * strength * 255.0).round() as u8;
+                let mut dst = [rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], rgba[i * 4 + 3]];
+                over(&mut dst, &[0, 0, 0, a]);
+                rgba[i * 4..i * 4 + 4].copy_from_slice(&dst);
+            }
+        }
+    }
+    // Straight RGBA → premultiplied-first BGRA.
+    let mut out = vec![0u8; n * 4];
+    for i in 0..n {
+        let (r, g, b, a) = (rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], rgba[i * 4 + 3]);
+        let pm = |c: u8| ((c as u32 * a as u32 + 127) / 255) as u8;
+        out[i * 4] = pm(b);
+        out[i * 4 + 1] = pm(g);
+        out[i * 4 + 2] = pm(r);
+        out[i * 4 + 3] = a;
+    }
+    Ok(out)
+}
+
 fn find_all_source_images(bundle: &Path, json: &serde_json::Value) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -449,6 +609,7 @@ fn build_icon_car(
     color_assets: &[ColorAsset],
     gradient_assets: &[GradientAsset],
     group: Option<&crate::icon_json::Group>,
+    layer_stacks: &[Vec<u8>],
     emit_variant_axis: bool,
     platform: &str,
     min_deploy: &str,
@@ -488,11 +649,18 @@ fn build_icon_car(
     // `emit_variant_axis` is set, every sized rendition is duplicated for
     // the alternate variant (same pixels — the variant axis is structural;
     // CUICatalog reads it to pick which alternate to display per-appearance).
-    for (img_path, pixel_size, scale) in icon_images {
-        // Force BGRA: the compositor and the GA8/GA16 conversion below both
-        // need true 4-byte pixels (a grayscale source would otherwise load as
-        // GA8 and be misread as BGRA, halving the rows).
-        let (layer_bgra, w, h, _pf_bgra) = load_image_as_bgra(img_path, true)?;
+    for (idx, (img_path, pixel_size, scale)) in icon_images.iter().enumerate() {
+        // Use the pre-rendered multi-layer stack (all layers + glass shading)
+        // for this size; fall back to the primary layer if absent.
+        let (layer_bgra, w, h) = match layer_stacks.get(idx) {
+            Some(stack) if stack.len() == (pixel_size * pixel_size * 4) as usize => {
+                (stack.clone(), *pixel_size, *pixel_size)
+            }
+            _ => {
+                let (b, w, h, _pf) = load_image_as_bgra(img_path, true)?;
+                (b, w, h)
+            }
+        };
         let point_size = pixel_size / scale;
         let dim2 = icon_dim2(point_size);
         for &variant in variants {
@@ -1783,6 +1951,40 @@ mod tests {
     fn palette(json: &str) -> (Vec<ColorAsset>, Vec<GradientAsset>) {
         let parsed = crate::icon_json::IconJson::parse(json).unwrap();
         fill_specializations_assets("X", &parsed)
+    }
+
+    fn write_solid_png(path: &Path, rgba: [u8; 4]) {
+        image::RgbaImage::from_pixel(64, 64, image::Rgba(rgba))
+            .save(path)
+            .unwrap();
+    }
+
+    #[test]
+    fn glass_layer_becomes_desaturated_relief() {
+        // A fully-opaque red square rendered as glass loses its colour and
+        // becomes a faint near-black overlay (premultiplied → 0,0,0 at low α).
+        let dir = std::env::temp_dir().join(format!("glass_t_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let red = dir.join("red.png");
+        write_solid_png(&red, [255, 0, 0, 255]);
+        let layers = vec![StackLayer { source: red, glass: true }];
+        let out = render_layer_stack(&layers, 64).unwrap();
+        let i = (32 * 64 + 32) * 4; // centre, premul-first BGRA
+        let (b, g, r, a) = (out[i], out[i + 1], out[i + 2], out[i + 3]);
+        assert!((5..70).contains(&a), "glass alpha should be low, got {a}");
+        assert_eq!((b, g, r), (0, 0, 0), "colour stripped to premultiplied black");
+    }
+
+    #[test]
+    fn non_glass_layer_keeps_colour() {
+        let dir = std::env::temp_dir().join(format!("noglass_t_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let red = dir.join("red2.png");
+        write_solid_png(&red, [255, 0, 0, 255]);
+        let layers = vec![StackLayer { source: red, glass: false }];
+        let out = render_layer_stack(&layers, 64).unwrap();
+        let i = (32 * 64 + 32) * 4; // premul-first BGRA, opaque red
+        assert_eq!((out[i], out[i + 1], out[i + 2], out[i + 3]), (0, 0, 255, 255));
     }
 
     #[test]
