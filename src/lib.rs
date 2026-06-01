@@ -3,6 +3,7 @@ pub mod car;
 pub mod catalog;
 pub mod compiler;
 pub mod icon_bundle;
+pub mod icon_effects;
 pub mod icon_json;
 pub mod icon_render;
 pub mod deepmap2;

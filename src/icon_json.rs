@@ -45,14 +45,24 @@ pub struct Group {
     pub layers: Vec<Layer>,
     #[serde(default)]
     pub shadow: Option<Shadow>,
+    #[serde(default, rename = "shadow-specializations")]
+    pub shadow_specializations: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     pub translucency: Option<Translucency>,
+    #[serde(default, rename = "translucency-specializations")]
+    pub translucency_specializations: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     pub specular: Option<bool>,
+    #[serde(default, rename = "specular-specializations")]
+    pub specular_specializations: Option<Vec<serde_json::Value>>,
     #[serde(default, rename = "blur-material")]
     pub blur_material: Option<serde_json::Value>,
     #[serde(default, rename = "blur-material-specializations")]
     pub blur_material_specializations: Option<Vec<serde_json::Value>>,
+    #[serde(default, rename = "lighting-specializations")]
+    pub lighting_specializations: Option<Vec<serde_json::Value>>,
+    #[serde(default, rename = "blend-mode-specializations")]
+    pub blend_mode_specializations: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -73,6 +83,8 @@ pub struct Layer {
     pub hidden_specializations: Option<Vec<serde_json::Value>>,
     #[serde(default, rename = "glass-specializations")]
     pub glass_specializations: Option<Vec<serde_json::Value>>,
+    #[serde(default, rename = "opacity-specializations")]
+    pub opacity_specializations: Option<Vec<serde_json::Value>>,
     #[serde(default, rename = "fill-specializations")]
     pub fill_specializations: Option<Vec<serde_json::Value>>,
     /// Per-layer fill (e.g. `{"solid": "extended-gray:0.84536,1.0"}` in
