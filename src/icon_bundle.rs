@@ -447,6 +447,14 @@ const LAYER_BASE_SCALE: f32 = 824.0 / 1024.0;
 /// KYA's cup body, lum ≈ 45/255).
 const GLASS_FLOOR: f32 = 45.0 / 255.0;
 
+/// Frosted-glass tint depth: a `layer-color`-shadow glass layer darkens the
+/// background by `D·(1 − colour)` per channel — a uniform subtractive tint, not
+/// a multiply. Measured constant (≈63.5/255) across background, colour, channel,
+/// vertical position and every translucency value > 0 via a solid-slab probe
+/// (`tools/probe_glass_tint.py`); overlapping tinted layers stack the
+/// subtraction additively.
+const GLASS_TINT_D: f32 = 63.5 / 255.0;
+
 /// One layer in render order: its rasterizable source, glass flag, and the
 /// affine placement (scale + translation in 1024-canvas pixels) resolved from
 /// the group and layer `position`.
@@ -697,14 +705,15 @@ fn render_layer_stack(
     let n = w * w;
     let mut rgba = vec![0u8; n * 4];
     let mut glass_cov = vec![0u8; n];
-    // Per-pixel multiplicative tint the frosted region applies to the
-    // background gradient (init 1 = no tint). Each *tinted* frosted layer
-    // (group shadow `layer-color`) folds its colour in by coverage-weighted
-    // multiply, so a saturated slab keeps its hue and two overlapping tinted
-    // groups stack (bg × blue × red → the purple overlap Apple emits). A plain
-    // frosted layer (shadow none/neutral) leaves the tint at 1 and only
-    // contributes the neutral relief darkening.
-    let mut glass_tint = vec![[1.0f32; 3]; n];
+    // Per-pixel subtractive tint a *tinted* frosted layer (group shadow
+    // `layer-color`) applies to the background: each adds `cov·D·(1 − colour)`
+    // per channel, so a saturated slab darkens the channels where it's dark and
+    // overlapping tinted layers stack additively (the purple overlap Apple
+    // emits where blue meets red). `glass_tinted` marks pixels under any tinted
+    // layer; a plain frosted layer (shadow none/neutral) instead contributes the
+    // neutral relief darkening.
+    let mut glass_sub = vec![[0.0f32; 3]; n];
+    let mut glass_tinted = vec![false; n];
     let mut spec_cov = vec![0u8; n];
     let mut any_glass = false;
     let mut any_specular = false;
@@ -742,13 +751,13 @@ fn render_layer_stack(
                     any_glass = true;
                     glass_cov[ci] = glass_cov[ci].max(sa);
                     if layer.tinted {
-                        // Coverage-weighted multiply: fold this layer's colour
-                        // into the running tint (lerp 1→colour by alpha), so
-                        // anti-aliased edges fade and overlaps compound.
+                        // Coverage-weighted subtractive tint: add D·(1−colour)
+                        // per channel, accumulating across overlapping layers.
                         let cov = sa as f32 / 255.0;
+                        glass_tinted[ci] = true;
                         for c in 0..3 {
                             let col = src[si + c] as f32 / 255.0;
-                            glass_tint[ci][c] *= 1.0 - cov + cov * col;
+                            glass_sub[ci][c] += cov * GLASS_TINT_D * (1.0 - col);
                         }
                     }
                 } else {
@@ -791,18 +800,21 @@ fn render_layer_stack(
                 }
                 let a = (cov * 255.0).round() as u8;
                 let glass_px = match gradient {
-                    // Frosted glass multiplies the gradient it sits over by the
-                    // accumulated tint (1 where only neutral glass, so ≈bg with
-                    // the slight relief darkening; the folded layer colours where
-                    // `layer-color` glass tints it), then applies the vertical
-                    // relief. We bake bg × tint as an opaque pixel; drawn over
-                    // the same gradient by the compositor this reproduces a
-                    // multiply blend.
+                    // We bake the resolved glass colour as an opaque pixel drawn
+                    // over the same gradient the compositor uses, so it replaces
+                    // the gradient with the glass result. A `layer-color`-tinted
+                    // pixel subtracts the accumulated `D·(1−colour)` from the
+                    // background (uniform, no vertical relief); a plain frosted
+                    // pixel keeps the faint vertical relief darkening.
                     Some(g) => {
                         let bg = g.sample(x as u32, y as u32, pixel_size);
                         let mut out = [0u8; 4];
                         for c in 0..3 {
-                            let v = bg[c] as f32 * glass_tint[i][c] * (1.0 - strength);
+                            let v = if glass_tinted[i] {
+                                bg[c] as f32 - glass_sub[i][c]
+                            } else {
+                                bg[c] as f32 * (1.0 - strength)
+                            };
                             out[c] = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
                         }
                         out[3] = a;
@@ -2376,11 +2388,11 @@ mod tests {
     }
 
     #[test]
-    fn tinted_glass_multiplies_gradient_and_stacks() {
-        // Tinted frosted glass (group shadow `layer-color`) multiplies the
-        // background gradient by its colour; two overlapping tinted layers stack
-        // their multiplies (bg × blue × red). A frosted-but-untinted layer
-        // leaves the background un-tinted (neutral relief only).
+    fn tinted_glass_subtracts_and_stacks() {
+        // Tinted frosted glass (group shadow `layer-color`) darkens the
+        // background by D·(1−colour) per channel; two overlapping tinted layers
+        // stack the subtraction additively. A frosted-but-untinted layer leaves
+        // the background un-tinted (neutral relief only).
         let dir = std::env::temp_dir().join(format!("tint_t_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let blue = dir.join("blue.png");
@@ -2408,16 +2420,19 @@ mod tests {
             native_h: 64,
         };
         let i = (32 * 64 + 32) * 4; // centre, premul-first BGRA (opaque → straight)
-        // One tinted blue layer: blue channel survives, red ≈ stripped.
+        // One tinted blue layer over grey 153: out = 153 − 63.5·(1−col).
+        // R(col 0) ≈ 89, B(col 0.9) ≈ 147 — darkened, blue ordering preserved.
         let single = render_layer_stack(&[mk(&blue, true)], 64, Some(&grad)).unwrap();
         let (b1, g1, r1) = (single[i], single[i + 1], single[i + 2]);
-        assert!(b1 > 100 && r1 < 20, "blue tint: B high R low, got {r1},{g1},{b1}");
-        // Blue over red: stacked multiply → both channels collapse, far darker.
+        assert!(b1 > g1 && g1 > r1, "blue tint ordering B>G>R, got {r1},{g1},{b1}");
+        assert!((80..100).contains(&r1) && (140..155).contains(&b1),
+            "subtractive tint magnitude off: {r1},{g1},{b1}");
+        // Blue over red: stacked subtraction → far darker on every channel.
         let stacked =
             render_layer_stack(&[mk(&blue, true), mk(&red, true)], 64, Some(&grad)).unwrap();
         assert!(
-            stacked[i] < b1 && stacked[i + 1] < g1,
-            "overlap must be darker than either single tint"
+            stacked[i] < b1 && stacked[i + 1] < g1 && stacked[i + 2] < r1,
+            "overlap must be darker than either single tint on all channels"
         );
         // Untinted frosted layer leaves the grey background (only relief).
         let neutral = render_layer_stack(&[mk(&blue, false)], 64, Some(&grad)).unwrap();

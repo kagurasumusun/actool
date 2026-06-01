@@ -92,23 +92,28 @@ from `layer-color` to `none`/`neutral` strips the slab to a neutral grey relief
 Rectangle's Overlay is `layer-color`, so its blue survives). The earlier
 "unconditional multiply" was wrong for non-`layer-color` glass.
 
-A *tinted* frosted layer (`layer-color`) multiplies the background gradient by
-its colour, accumulated into a per-pixel `glass_tint` (coverage-weighted), baked
-opaque so the compositor reproduces a multiply over the same gradient.
-Overlapping tinted groups **stack** their multiplies — `bg × blue × red` gives
-the dark-purple overlap Apple emits where a blue and a red glass group cross
-(verified on the synthetic). An untinted frosted layer leaves `glass_tint` at 1,
-so it only contributes the vertical relief darkening (≈`bg`), and an icon with
-no top-level gradient (scrumdinger's `fill: None`) hits the neutral-relief
-fallback byte-identically.
+A *tinted* frosted layer (`layer-color`) darkens the background **subtractively**
+by `D·(1 − colour)` per channel — `out_c = bg_c − D·(1 − colour_c)` — not a
+multiply. A solid-slab probe (`tools/probe_glass_tint.py`: a full-canvas
+solid-colour glass slab over a flat solid background, swept) measured
+**`D = 63.5/255 ≈ 0.249`, constant** across background (0.3–0.9), colour,
+channel, vertical position, and *every* translucency value > 0 (the value only
+gates the tint on/off — 0 is opaque). It's accumulated per pixel into `glass_sub`
+(coverage-weighted) and baked opaque over the gradient. Overlapping tinted groups
+**stack the subtraction additively** — the dark-purple overlap Apple emits where
+a blue and a red glass group cross (`[81,50,84]`, predicted `[83,45,83]`). An
+untinted frosted layer instead contributes the faint vertical relief darkening
+(≈`bg`), and an icon with no top-level gradient (scrumdinger's `fill: None`)
+hits the neutral-relief fallback byte-identically.
 
-Rectangle's blue Overlay drops from a near-uniform grey (mean diff 16.3) to a
-recognisable blue right-half over a grey left-half (11.5); right-mid Apple
-`[7,67,104]` vs ours `[0,54,97]`. The exact tint *strength* is renderer-bound —
-Rectangle wants a near-full multiply at translucency 0.5 while the synthetic's
-softer slabs want ≈0.4, with no clean law across them, so we keep the full
-multiply that fits the real fixture and accept the synthetic is over-saturated
-(an artificial fixture with no parity obligation).
+This replaced an earlier coincidental full-multiply (`k=1`) that only fit
+Rectangle's dark background. The subtractive `D` reproduces Apple's tint at any
+background automatically: Rectangle's right-mid lands `[15,66,103]` vs Apple
+`[7,67,104]` (was `[0,54,97]`). The blue Overlay went from a near-uniform grey
+(mean diff 16.3) to a recognisable blue right-half over a grey left-half (≈12);
+the residual is the device-RGB vs Apple-space gradient interpolation showing
+through the tint, top-to-bottom — the standing ≈6/luma gradient gap, not the tint
+strength (now measured exactly).
 
 **Layer placement (`LAYER_BASE_SCALE`) is verified correct** — not a gap. A
 marker-based sweep (`tools/probe_layer_placement.py`: 5 coloured squares at
