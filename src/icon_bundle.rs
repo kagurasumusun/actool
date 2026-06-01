@@ -285,13 +285,22 @@ pub fn compile_icon_bundle(
     use crate::icon_effects::Appearance;
     let light_layers = collect_stack_layers(icon_path, &parsed, Appearance::Light);
     let dark_layers = collect_stack_layers(icon_path, &parsed, Appearance::Dark);
+    // Frosted-glass layers multiply the background gradient, so the stack
+    // renderer needs the same fill the compositor will draw under it.
+    let light_fill = gradient_assets
+        .first()
+        .and_then(|g| resolve_gradient_fill(g, &color_assets));
+    let dark_fill = gradient_assets
+        .get(1)
+        .and_then(|g| resolve_gradient_fill(g, &color_assets));
     let mut light_stacks: Vec<Vec<u8>> = Vec::with_capacity(MACOS_ICON_SIZES.len());
     let mut dark_stacks: Vec<Vec<u8>> = Vec::with_capacity(MACOS_ICON_SIZES.len());
     for (point_size, scale) in MACOS_ICON_SIZES {
         let px = point_size * scale;
-        light_stacks.push(render_layer_stack(&light_layers, px)?);
+        light_stacks.push(render_layer_stack(&light_layers, px, light_fill.as_ref())?);
         if emit_variant_axis {
-            dark_stacks.push(render_layer_stack(&dark_layers, px)?);
+            let dfill = dark_fill.as_ref().or(light_fill.as_ref());
+            dark_stacks.push(render_layer_stack(&dark_layers, px, dfill)?);
         }
     }
 
@@ -304,7 +313,7 @@ pub fn compile_icon_bundle(
         &group_facet_names,
         &color_assets,
         &gradient_assets,
-        parsed.groups.first(),
+        &parsed.groups,
         &light_stacks,
         &dark_stacks,
         emit_variant_axis,
@@ -671,11 +680,20 @@ fn composite_blend(dst: &mut [u8], src: &[u8], mode: BlendMode) {
 /// a near-black overlay at low opacity that darkens toward the bottom (the
 /// concave-sphere shading measured from scrumdinger, lum ≈ 232 at the centre,
 /// 225 lower, vs a white background). Non-glass layers composite normally.
-fn render_layer_stack(layers: &[StackLayer], pixel_size: u32) -> Result<Vec<u8>> {
+fn render_layer_stack(
+    layers: &[StackLayer],
+    pixel_size: u32,
+    gradient: Option<&crate::icon_render::GradientFill>,
+) -> Result<Vec<u8>> {
     let w = pixel_size as usize;
     let n = w * w;
     let mut rgba = vec![0u8; n * 4];
     let mut glass_cov = vec![0u8; n];
+    // Colour of the frosted layer at each covered pixel (topmost / strongest
+    // coverage wins). The frosted region multiplies the background gradient by
+    // this colour, so a saturated glass slab (Rectangle's blue Overlay) keeps
+    // its hue instead of collapsing to a neutral relief.
+    let mut glass_rgb = vec![[0u8; 3]; n];
     let mut spec_cov = vec![0u8; n];
     let mut any_glass = false;
     let mut any_specular = false;
@@ -711,6 +729,9 @@ fn render_layer_stack(layers: &[StackLayer], pixel_size: u32) -> Result<Vec<u8>>
                 let ci = (cy * w as i64 + cx) as usize;
                 if layer.frosted {
                     any_glass = true;
+                    if sa >= glass_cov[ci] {
+                        glass_rgb[ci] = [src[si], src[si + 1], src[si + 2]];
+                    }
                     glass_cov[ci] = glass_cov[ci].max(sa);
                 } else {
                     let mut dst =
@@ -750,9 +771,30 @@ fn render_layer_stack(layers: &[StackLayer], pixel_size: u32) -> Result<Vec<u8>>
                 if cov <= 0.0 {
                     continue;
                 }
-                let a = (cov * strength * 255.0).round() as u8;
+                let a = (cov * 255.0).round() as u8;
+                let glass_px = match gradient {
+                    // Frosted glass multiplies the gradient it sits over by the
+                    // layer's colour (Rectangle's blue Overlay → bg × blue; a
+                    // light/neutral layer → ≈bg, matching the old relief), then
+                    // applies the slight vertical relief darkening. We bake
+                    // bg × tint as an opaque pixel; drawn over the same gradient
+                    // by the compositor this reproduces a multiply blend.
+                    Some(g) => {
+                        let bg = g.sample(x as u32, y as u32, pixel_size);
+                        let mut out = [0u8; 4];
+                        for c in 0..3 {
+                            let tint = glass_rgb[i][c] as f32 / 255.0;
+                            let v = bg[c] as f32 * tint * (1.0 - strength);
+                            out[c] = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                        }
+                        out[3] = a;
+                        out
+                    }
+                    // No gradient (raw-layer fallback): keep the neutral relief.
+                    None => [0, 0, 0, (cov * strength * 255.0).round() as u8],
+                };
                 let mut dst = [rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], rgba[i * 4 + 3]];
-                composite_blend(&mut dst, &[0, 0, 0, a], BlendMode::Normal);
+                composite_blend(&mut dst, &glass_px, BlendMode::Normal);
                 rgba[i * 4..i * 4 + 4].copy_from_slice(&dst);
             }
         }
@@ -848,7 +890,7 @@ fn build_icon_car(
     group_facet_names: &[String],
     color_assets: &[ColorAsset],
     gradient_assets: &[GradientAsset],
-    group: Option<&crate::icon_json::Group>,
+    groups: &[crate::icon_json::Group],
     light_stacks: &[Vec<u8>],
     dark_stacks: &[Vec<u8>],
     emit_variant_axis: bool,
@@ -879,11 +921,20 @@ fn build_icon_car(
         .get(1)
         .and_then(|g| resolve_gradient_fill(g, color_assets));
 
-    // Drop shadow, resolved per appearance from the group's effect
-    // specializations (primary variant → light, alternate → dark).
-    use crate::icon_effects::{resolve_icon_effects, Appearance};
-    let light_shadow = group.map(|g| resolve_icon_effects(g, Appearance::Light).shadow);
-    let dark_shadow = group.map(|g| resolve_icon_effects(g, Appearance::Dark).shadow);
+    // Drop shadow, resolved per appearance from the effect specializations
+    // (primary variant → light, alternate → dark). The icon's single drop
+    // shadow comes from the first group that requests one — a back group with
+    // `shadow: none` (Rectangle's Dots) must not suppress a front group's
+    // `layer-color` shadow (Overlay). Single-group icons are unaffected.
+    use crate::icon_effects::{resolve_icon_effects, Appearance, ShadowKind};
+    let group_shadow = |ap: Appearance| {
+        groups
+            .iter()
+            .map(|g| resolve_icon_effects(g, ap).shadow)
+            .find(|s| s.kind != ShadowKind::None && s.opacity > 0.0)
+    };
+    let light_shadow = group_shadow(Appearance::Light);
+    let dark_shadow = group_shadow(Appearance::Dark);
 
     // Split images into atlas candidates (small sizes) and inline (large).
     // For each size load BGRA pixels, then dispatch by point size. When
@@ -2225,7 +2276,7 @@ mod tests {
         let red = dir.join("red.png");
         write_solid_png(&red, [255, 0, 0, 255]);
         let layers = vec![StackLayer { source: red, frosted: true, specular: false, scale: 1.0, tx: 0.0, ty: 0.0, opacity: 1.0, blend: BlendMode::Normal, native_w: 64, native_h: 64 }];
-        let out = render_layer_stack(&layers, 64).unwrap();
+        let out = render_layer_stack(&layers, 64, None).unwrap();
         let i = (32 * 64 + 32) * 4; // centre, premul-first BGRA
         let (b, g, r, a) = (out[i], out[i + 1], out[i + 2], out[i + 3]);
         assert!((5..70).contains(&a), "glass alpha should be low, got {a}");
@@ -2239,7 +2290,7 @@ mod tests {
         let red = dir.join("red2.png");
         write_solid_png(&red, [255, 0, 0, 255]);
         let layers = vec![StackLayer { source: red, frosted: false, specular: false, scale: 1.0, tx: 0.0, ty: 0.0, opacity: 1.0, blend: BlendMode::Normal, native_w: 64, native_h: 64 }];
-        let out = render_layer_stack(&layers, 64).unwrap();
+        let out = render_layer_stack(&layers, 64, None).unwrap();
         let i = (32 * 64 + 32) * 4; // premul-first BGRA, opaque red
         assert_eq!((out[i], out[i + 1], out[i + 2], out[i + 3]), (0, 0, 255, 255));
     }
@@ -2264,7 +2315,7 @@ mod tests {
             native_w: 256,
             native_h: 128,
         }];
-        let out = render_layer_stack(&layers, 1024).unwrap();
+        let out = render_layer_stack(&layers, 1024, None).unwrap();
         let opaque = |x: usize, y: usize| out[(y * 1024 + x) * 4 + 3] > 0;
         let mut xs = (0, 0);
         let mut ys = (0, 0);

@@ -80,11 +80,21 @@ layer-color are both approximated as black.
 
 **Glass — implemented (approximate).** `icon_bundle::render_layer_stack`
 composites *all* a group's layers (previously only the first was used) into one
-premultiplied-first BGRA, which the compositor draws over the gradient. Glass
-layers are merged into a coverage mask and rendered as Apple's frosted relief:
-the layer colour is stripped and replaced by a near-black overlay. A layer is
-glass if it opts in, or if the group is a *glass context* (translucency/blur
+premultiplied-first BGRA, which the compositor draws over the gradient. A layer
+is glass if it opts in, or if the group is a *glass context* (translucency/blur
 enabled, or a sibling is glass) and it hasn't opted out with `glass: false`.
+
+Frosted glass **multiplies the background gradient by the layer's own colour**
+(`glass_rgb` per covered pixel) plus the slight vertical relief darkening, baked
+as an opaque pixel so the compositor reproduces a multiply blend over the same
+gradient. A saturated slab keeps its hue — Rectangle's blue Overlay
+(`bg × blue`, translucency 0.5) drops from a near-uniform grey (mean diff 16.3)
+to a recognisable blue right-half over a grey left-half (11.6); right-mid Apple
+`[7,67,104]` vs ours `[0,54,97]`. A light/neutral layer multiplies to ≈`bg`, so
+scrumdinger's near-white frost is unchanged, and an icon with no top-level
+gradient (scrumdinger's `fill: None`) hits the neutral-relief fallback
+byte-identically. This unifies the earlier strip-to-relief special case: that
+was just the light-layer limit of the multiply.
 
 The glass darkening is **only ≈3%** — recovered by decoding Apple's scrumdinger
 GA8 and dividing the layer-region luma by the local background: out/bg ≈0.975
@@ -146,6 +156,15 @@ icon): our coffee cup matches Apple's — body lum 39 vs 45, rim-highlight peak
 > top-left corner — the KYA cup landed oversized and offset. It now scales the
 > SVG by `target / native` (a no-op, hence byte-identical, when they already
 > match, as in the xcassets path). Mean diff over the KYA icon dropped 48 → 15.
+
+**Per-group drop shadow — implemented.** The icon's single drop shadow is now
+resolved from the *first group that requests one* (`build_icon_car`:
+`find(|s| s.kind != None)`), not just `groups.first()`. Rectangle's back group
+(Dots) is `shadow: none` and would suppress the front group's (Overlay)
+`layer-color` shadow; Apple bakes that shadow (bottom margin ≈25k px vs ≈15k
+top — asymmetric, heavier below). Single-group icons, transmission
+(group 0 already `layer-color`) and ding_icon (`neutral`) are unaffected, so the
+19/32 transmission parity is preserved.
 
 **Blur-material / lighting — not rendered; per-region glass detail — measured
 negligible.** Parameters are resolved. Decoding Apple's scrumdinger GA8 shows

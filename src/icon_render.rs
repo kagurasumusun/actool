@@ -169,6 +169,35 @@ pub struct GradientFill {
     pub stop: [f32; 2],
 }
 
+impl GradientFill {
+    /// Sample the background gradient colour (device-RGB 0..1) at canvas pixel
+    /// `(x, y)` for a `pixel_size²` rendition — the same projection
+    /// `composite_icon` hands to CoreGraphics (clamped linear interpolation
+    /// across the content rect). Used to reproduce the colour a frosted-glass
+    /// layer multiplies, since the gradient is drawn under the layer stack.
+    pub fn sample(&self, x: u32, y: u32, pixel_size: u32) -> [f64; 3] {
+        let margin = pixel_size as f64 * MARGIN_RATIO;
+        let content = (pixel_size as f64 - 2.0 * margin).max(1.0);
+        // Normalize the pixel into the content rect, matching `to_ctx`.
+        let nx = (x as f64 + 0.5 - margin) / content;
+        let ny = (y as f64 + 0.5 - margin) / content;
+        let (sx, sy) = (self.start[0] as f64, self.start[1] as f64);
+        let (ex, ey) = (self.stop[0] as f64, self.stop[1] as f64);
+        let (dx, dy) = (ex - sx, ey - sy);
+        let len2 = dx * dx + dy * dy;
+        let t = if len2 <= 0.0 {
+            0.0
+        } else {
+            (((nx - sx) * dx + (ny - sy) * dy) / len2).clamp(0.0, 1.0)
+        };
+        [
+            self.start_rgb[0] + (self.stop_rgb[0] - self.start_rgb[0]) * t,
+            self.start_rgb[1] + (self.stop_rgb[1] - self.start_rgb[1]) * t,
+            self.start_rgb[2] + (self.stop_rgb[2] - self.start_rgb[2]) * t,
+        ]
+    }
+}
+
 /// A drop shadow cast by the icon squircle. Drawn before the icon is clipped,
 /// so it bleeds into the surrounding margin. See `icon_effects::shadow_geometry`
 /// for the measured defaults.
