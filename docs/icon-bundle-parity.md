@@ -89,9 +89,17 @@ by rendering Apple's `.car` through CUICatalog (`tools/extract_pixels`):
 
 1. **Squircle clip** — a rounded-rect inset `100/1024` of the canvas with
    corner radius `220/1024` (measured from Apple's 1024px output).
-2. **Background gradient** — the icon's light gradient (`Gradient-1`), its two
-   stop colors and `orientation` taken from the palette.
-3. **Layer** — drawn on top, clipped to the same squircle.
+2. **Background** — for a gradient/automatic fill, the icon's light gradient
+   (`Gradient-1`), its two stop colors and `orientation` from the palette. For a
+   `solid` fill, the **flat solid colour** (`Color-2`): Apple's light rendition
+   paints that, not `Gradient-1` (which for a solid fill is the *dark-mode*
+   background `0.192→0.078`). `resolve_background_fills` returns the solid colour
+   as the light fill — without it tagspaces rendered a black background (mean
+   diff vs Apple dropped from ~full-scale to **1.8** once fixed).
+3. **Layer** — drawn on top, clipped to the same squircle, placed at a fixed
+   `824/1024` of its viewBox (centred, aspect-preserved, group/layer
+   `position.scale`·translation composed). Verified pixel-exact via the marker
+   sweep (`tools/probe_layer_placement.py`); see `icon-shading.md`.
 
 We render all three with the **same Apple rasterizers** the system actool uses
 — CoreSVG for the layer (`svg_raster.rs`), CoreGraphics for the gradient/mask
@@ -102,9 +110,11 @@ this, sized renditions were the raw layer on a full square; now non-variant
 `.icon` bundles render as proper macOS squircle icons.
 
 Not reproduced: the drop shadow, specular highlight, and the layer's raised
-glass shading; the exact layer inset/scale (Apple insets the layer slightly).
-The gradient stops are interpolated in device-RGB rather than Apple's space,
-leaving a residual ≈6/luma curve difference across the gradient.
+glass shading. (Layer inset/scale **is** reproduced — the fixed `824/1024`
+placement is verified pixel-exact by the marker sweep; an earlier "Apple insets
+the layer slightly" suspicion was a measurement artifact.) The gradient stops
+are interpolated in device-RGB rather than Apple's space, leaving a residual
+≈6/luma curve difference across the gradient.
 
 **Variant-axis bundles** (top-level `fill-specializations`, e.g. feishin /
 scrumdinger) store the *same* composite, just as grayscale: primary variant →

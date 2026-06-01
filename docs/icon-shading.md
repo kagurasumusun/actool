@@ -108,10 +108,21 @@ recognisable blue right-half over a grey left-half (11.5); right-mid Apple
 Rectangle wants a near-full multiply at translucency 0.5 while the synthetic's
 softer slabs want ≈0.4, with no clean law across them, so we keep the full
 multiply that fits the real fixture and accept the synthetic is over-saturated
-(an artificial fixture with no parity obligation). Full-canvas synthetic glass
-also reveals the `LAYER_BASE_SCALE` 824/1024 inset (Apple's glass fills the
-squircle) — left unchanged, since real fixtures design their layers for the
-content area.
+(an artificial fixture with no parity obligation).
+
+**Layer placement (`LAYER_BASE_SCALE`) is verified correct** — not a gap. A
+marker-based sweep (`tools/probe_layer_placement.py`: 5 coloured squares at
+known viewBox fractions, compiled with `/usr/bin/actool`, centroids measured
+across format/glass/scale/translation/viewBox-size/aspect) shows Apple places a
+layer at a **fixed `824/1024` of the layer's own viewBox**, centred, aspect
+preserved, with group and layer `position.scale` multiplying and
+`translation-in-points` applied in that scaled space — exactly
+`render_layer_stack`'s `scale = base·gscale·lscale`, `tx = base·(gscale·ltx +
+gtx)`. Confirmed: 512² viewBox → 413 px, 1024² → 824 px, wide/tall preserve
+aspect. element-web matches Apple's layer extent to the pixel and tagspaces'
+positioned logo (scale 1.15 + translation) lands exactly. The earlier "Apple's
+glass fills the squircle / we inset" note was a measurement artifact: a bluish
+background gradient inflated a colour-threshold bbox.
 
 The glass darkening is **only ≈3%** — recovered by decoding Apple's scrumdinger
 GA8 and dividing the layer-region luma by the local background: out/bg ≈0.975

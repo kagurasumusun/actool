@@ -286,13 +286,10 @@ pub fn compile_icon_bundle(
     let light_layers = collect_stack_layers(icon_path, &parsed, Appearance::Light);
     let dark_layers = collect_stack_layers(icon_path, &parsed, Appearance::Dark);
     // Frosted-glass layers multiply the background gradient, so the stack
-    // renderer needs the same fill the compositor will draw under it.
-    let light_fill = gradient_assets
-        .first()
-        .and_then(|g| resolve_gradient_fill(g, &color_assets));
-    let dark_fill = gradient_assets
-        .get(1)
-        .and_then(|g| resolve_gradient_fill(g, &color_assets));
+    // renderer needs the same fill the compositor will draw under it. The
+    // solid-fill case uses the flat solid colour for the light background.
+    let (light_fill, dark_fill) =
+        resolve_background_fills(&parsed, &gradient_assets, &color_assets);
     let mut light_stacks: Vec<Vec<u8>> = Vec::with_capacity(MACOS_ICON_SIZES.len());
     let mut dark_stacks: Vec<Vec<u8>> = Vec::with_capacity(MACOS_ICON_SIZES.len());
     for (point_size, scale) in MACOS_ICON_SIZES {
@@ -316,6 +313,8 @@ pub fn compile_icon_bundle(
         &parsed.groups,
         &light_stacks,
         &dark_stacks,
+        light_fill.as_ref(),
+        dark_fill.as_ref(),
         emit_variant_axis,
         platform,
         min_deploy,
@@ -912,6 +911,8 @@ fn build_icon_car(
     groups: &[crate::icon_json::Group],
     light_stacks: &[Vec<u8>],
     dark_stacks: &[Vec<u8>],
+    light_fill: Option<&crate::icon_render::GradientFill>,
+    dark_fill: Option<&crate::icon_render::GradientFill>,
     emit_variant_axis: bool,
     platform: &str,
     min_deploy: &str,
@@ -931,14 +932,10 @@ fn build_icon_car(
         variants.iter().map(|_| Vec::new()).collect();
 
     // The sized rendition is the layer composited over the icon's background
-    // gradient and clipped to the macOS squircle. The primary variant uses the
-    // light gradient (Gradient-1), the alternate uses the dark one (Gradient-2);
-    // verified by decoding Apple's GA8/GA16 renditions with libdm2's KCBC path.
-    // With no gradient we fall back to the raw layer.
-    let light_fill = gradient_assets.first().and_then(|g| resolve_gradient_fill(g, color_assets));
-    let dark_fill = gradient_assets
-        .get(1)
-        .and_then(|g| resolve_gradient_fill(g, color_assets));
+    // (resolved by the caller: the light gradient/solid for the primary variant,
+    // the dark gradient for the alternate; verified by decoding Apple's GA8/GA16
+    // renditions with libdm2's KCBC path). With no fill we fall back to the raw
+    // layer.
 
     // Drop shadow, resolved per appearance from the effect specializations
     // (primary variant → light, alternate → dark). The icon's single drop
@@ -985,9 +982,9 @@ fn build_icon_car(
             // clipped to the squircle. The alternate variant uses the dark
             // gradient when present.
             let fill = if variant == 1 {
-                dark_fill.as_ref().or(light_fill.as_ref())
+                dark_fill.or(light_fill)
             } else {
-                light_fill.as_ref()
+                light_fill
             };
             let shadow = shadow_params(
                 if variant == 1 { dark_shadow } else { light_shadow },
@@ -1551,6 +1548,48 @@ fn resolve_gradient_fill(
         start: [g[0], top_y],
         stop: [g[2], bot_y],
     })
+}
+
+/// A flat (single-colour) background fill — both gradient stops the same RGB.
+fn flat_fill(rgb: [f64; 3]) -> crate::icon_render::GradientFill {
+    crate::icon_render::GradientFill {
+        start_rgb: rgb,
+        stop_rgb: rgb,
+        start: [0.5, 0.0],
+        stop: [0.5, 1.0],
+    }
+}
+
+/// The flat background colour for a `fill: {"solid": "<spec>"}` icon. Apple's
+/// light rendition paints this solid colour (not the dark `Gradient-1`, which
+/// is the dark-mode background), so it must drive the light composite directly.
+fn solid_fill_color(parsed: &IconJson) -> Option<[f64; 3]> {
+    let Some(Fill::Structured(v)) = parsed.fill.as_ref() else { return None };
+    let spec = v.get("solid").and_then(|x| x.as_str())?;
+    let (_cspace, comps) = parse_color_spec(spec)?;
+    Some(match comps.as_slice() {
+        [g, _a] => [*g, *g, *g],
+        [r, g, b, _a] => [*r, *g, *b],
+        _ => return None,
+    })
+}
+
+/// Resolve the (light, dark) background fills the compositor draws under the
+/// layer stack. For a `solid` fill the light background is the flat solid
+/// colour and the (dark-mode) `Gradient-1` is the dark fill; otherwise
+/// `Gradient-1` is light and `Gradient-2` (if any) is dark.
+fn resolve_background_fills(
+    parsed: &IconJson,
+    gradient_assets: &[GradientAsset],
+    color_assets: &[ColorAsset],
+) -> (Option<crate::icon_render::GradientFill>, Option<crate::icon_render::GradientFill>) {
+    if let Some(rgb) = solid_fill_color(parsed) {
+        let dark = gradient_assets.first().and_then(|g| resolve_gradient_fill(g, color_assets));
+        return (Some(flat_fill(rgb)), dark);
+    }
+    let light = gradient_assets.first().and_then(|g| resolve_gradient_fill(g, color_assets));
+    let dark = gradient_assets.get(1).and_then(|g| resolve_gradient_fill(g, color_assets));
+    (light, dark)
 }
 
 /// Apple's default palette for `fill: "automatic"`. Empirically observed in
