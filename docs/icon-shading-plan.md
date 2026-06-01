@@ -3,8 +3,21 @@
 Status of the IconComposer render pipeline after the position / blend / opacity
 / glass / specular / multi-group work, and what it would take to close the rest.
 Grounded in measurements against Apple's output (`tools/extract_pixels`, GA8
-decode). The render pass lives in `icon_bundle::render_layer_stack` +
+decode) **and synthetic controlled fixtures** — copying a bundle and varying one
+property at a time, then compiling with `/usr/bin/actool` and measuring the
+isolated effect. The render pass lives in `icon_bundle::render_layer_stack` +
 `icon_render`; effect parameters are already resolved by `icon_effects`.
+
+## TL;DR (after synthetic-fixture probing)
+
+None of the three remaining shaders meaningfully changes the *static* `.car`
+renditions, so none is worth implementing for rendition parity:
+
+| shader | synthetic finding | verdict |
+|--------|-------------------|---------|
+| per-region glass | ≈2/luma vs input luminance | not a gap |
+| lighting (individual/combined) | **byte-identical** output (overlapping glass circles merge to one relief either way) | live-render hint only; we already do the "combined" union |
+| blur-material | subtle relief-strength bump, **saturates at value ≈2.0**, ≤9/luma | optional, near noise |
 
 ## What's already done
 
@@ -32,59 +45,50 @@ essentially the vertical gradient (already reproduced); the ~5-luma residual is
 edge anti-aliasing on the segment boundaries, not a missing shading term.
 **Plan: none.** Update the docs to stop calling this an open shader.
 
-### 2. blur-material — **real, low visible impact, pure-Rust feasible**
+### 2. blur-material — **measured: relief-strength, saturates at ≈2, not blur**
 
-*What it is.* A group property (`blur_material`, 0..1; `None` = off) that frosts
-the group's backdrop. On a **frosted** glass group it softens the relief itself
-(KYALauncher: `system-dark` + translucency-on + blur 0.5 renders the cup as a
-*soft* dark emboss). On an **opaque** group it would soften the backdrop showing
-through — but every available fixture has a smooth gradient backdrop, so the
-visible effect is tiny and there is **no fixture to verify it precisely**.
+Synthetic sweep (copy of the KYALauncher cup, `system-dark` + frosted glass,
+`blur-material` swept 0 → 20 against `/usr/bin/actool`):
 
-*Data.* `IconEffects.blur_material: Option<f32>` (already resolved per
-appearance).
+| value | Δ vs 0 (mean / max luma) | relief edge contrast |
+|-------|--------------------------|----------------------|
+| 0.0 | 0 / 0 | 1 |
+| 0.5 | 0.15 / 4 | 3 |
+| 1.0 | 0.27 / 7 | 6 |
+| 2.0 | 0.36 / 9 | 7 |
+| 5.0, 20.0 | 0.36 / 9 (**identical to 2.0**) | 7 |
 
-*Feasibility.* We composite into our own straight-RGBA buffer, so no new FFI is
-needed — a separable box blur applied 3× approximates a Gaussian. Radius scales
-with the value and `pixel_size` (needs a fixture sweep to fix the constant;
-≈value·k·pixel_size).
+Findings, contradicting the earlier "0..1 Gaussian backdrop blur" guess:
+* `actool` **accepts values > 1**, but the effect **saturates at ≈2.0** — 5 and
+  20 are byte-identical to 2. So the effective range is `[0, ~2]`.
+* It is **not** a backdrop Gaussian: a sharp-striped backdrop behind frosted
+  glass stays sharp at every value, and the relief edge contrast *increases*
+  with the value rather than softening. It reads as a glass relief/refraction
+  **strength**, not a radius.
+* Peak effect is ≤9/luma — near the noise floor.
 
-*Implementation steps.*
-1. Add `blur: f32` (resolved group blur) to the per-group data feeding
-   `render_layer_stack` (currently per-layer; this needs a per-group grouping —
-   see "Refactor note").
-2. `fn box_blur(buf, w, radius)` + `fn gaussian3(buf, w, radius)` on RGBA.
-3. For a frosted group: blur the `glass_cov` mask by `radius` before the relief
-   pass (softens the relief — the KYALauncher look).
-4. For an opaque group with blur: blur the accumulated backdrop region under the
-   group's coverage before compositing the group.
+*Verdict.* Optional. If implemented, model it as a relief-strength multiplier
+(`min(value, 2.0)`) on the frosted relief, **not** a blur, gated on
+`blur_material.is_some()`. Low value; skip unless chasing the last few luma.
 
-*Cost / risk.* ~½ day. Low risk (additive, gated on `blur_material.is_some()`),
-but **unverifiable** beyond eyeballing KYALauncher — no clean numeric target.
+### 3. lighting (`individual` / `combined`) — **measured: no static effect**
 
-### 3. lighting (`individual` / `combined`) — **real, no measurable fixture**
+Synthetic test (two overlapping glass circles, opaque *and* frosted variants,
+`lighting` = individual vs combined): the two outputs are **byte-identical**
+(mean 0 / max 0). The overlapping circles merge into a single relief either way.
 
-*What it is.* Per group; decides whether the bevel/specular is computed per
-layer (`individual`) or once over the merged group shape (`combined`). Only
-matters for **multi-layer glass groups**.
+*Conclusion.* `lighting` does not change the baked `.car` renditions — Apple
+always composites the group as one merged shape (the "combined" union, which is
+exactly what we already do). It must be a **live-render hint** (how the specular
+responds to device motion / pointer), which doesn't exist in a static rendition.
+**Plan: none** — implementing per-layer `individual` lighting would *diverge*
+from Apple's static output.
 
-*Data.* `IconEffects.lighting` (resolved). Today we always union a group's glass
-coverage and emboss once — i.e. effectively `combined`.
+## Refactor note (still worth it, for other reasons)
 
-*Implementation steps.*
-1. For `individual`: emboss each glass layer's own coverage separately (and
-   keep separate frosted coverage), rather than the union.
-2. For `combined`: current behaviour.
-
-*Cost / risk.* ~½ day once the per-group refactor exists. **Blocker: no fixture
-exercises it measurably** — the only one with `lighting` specializations is
-feishin, whose layer is blank (broken SVG filter) and whose `combined` is
-tinted-only (an appearance we don't even emit). So it can be implemented but not
-verified; correctness would be a guess.
-
-## Refactor note (shared prerequisite)
-
-blur-material and lighting are **group** properties, but `render_layer_stack`
+The remaining group properties that *do* affect static output — `shadow`,
+`specular`, `translucency`, and the per-group fills — are today read only from
+the **first** group. `render_layer_stack`
 currently flattens all groups into one reversed layer list and unions all glass
 coverage globally. To honour per-group blur / lighting the stack must be
 restructured to **composite group-by-group** (back-to-front): render each
@@ -95,18 +99,23 @@ currently read only from the first group.
 
 ## Recommended order
 
-1. **Mark per-region glass "done"** (doc-only) — it isn't a gap.
-2. **Per-group compositing refactor** — unlocks blur, lighting, and correct
-   per-group shadow/specular/translucency. Highest leverage.
-3. **blur-material** on the frosted path (verify visually vs KYALauncher).
-4. **lighting** — implement both modes, but flag as unverifiable.
+1. **All three shaders: no implementation needed** — per-region glass is
+   negligible, lighting has no static effect, blur-material is ≤9/luma and
+   saturates. The synthetic fixtures settled this.
+2. **Per-group compositing refactor** (the one valuable item) — composite
+   group-by-group so per-group `shadow` / `specular` / `translucency` are honored
+   (today only the first group's are). This *does* change static output for
+   multi-group icons like transmission.
+3. Only if chasing the last luma: blur-material as a relief-strength multiplier
+   (`min(value, 2)`), verified against the synthetic sweep above.
 
 ## Honest assessment
 
-The remaining shaders are **diminishing returns**: per-region glass is
-negligible, and blur-material + lighting have no fixture that lets us verify
-them numerically (smooth backdrops / blank-layer feishin). The per-group
-compositing refactor is worth doing for its own sake (correct per-group
-shadow/specular), and blur-material rides on it cheaply; lighting is
-implementable but a guess. None move the byte-parity needle (impossible), and
-none are as impactful as the work already landed.
+Probing with synthetic fixtures resolved the open questions and the answer is
+clean: **the remaining "shaders" don't change the static renditions** (lighting
+is a live-render hint, per-region glass is ~2 luma, blur-material is ≤9 luma and
+saturates at 2). The only static-relevant gap left is per-group property
+handling, which is a compositing-structure refactor, not a shader. Nothing here
+moves the byte-parity ceiling (impossible: random UUIDs + Apple's rasterizer).
+The synthetic-fixture method itself is the reusable takeaway — it converts
+"unverifiable" effects into measured ones.
