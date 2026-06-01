@@ -101,6 +101,14 @@ how the stored geometry orders its endpoints (feishin's `[0.5,1]→[0.5,0.3]` is
 unchanged; scrumdinger/automatic `[0.5,0]→[0.5,1]` was rendering upside down).
 element-web (non-glass) keeps full colour; only its frame flips white-to-top.
 
+**Layer order / native size.** Layers paint back-to-front (icon.json lists them
+front-to-back, so `collect_stack_layers` reverses), and each is rendered at its
+**native viewBox size and aspect** scaled by base·group·layer, not stretched to
+a square — so transmission's non-1024 parts (HandleShaft 256×410, Handle
+782×284, Plate 868×869, …) keep their proportions and stack in the right order.
+Together these turn transmission from a scrambled mess into a recognisable
+red-capsule-on-striped-plate (mean diff ≈26, capsule area within 4% of Apple).
+
 **Layer position — implemented.** `render_layer_stack` places each layer with
 its resolved affine transform instead of drawing it 1:1. A `scale = 1` layer is
 drawn into the icon content area (824/1024 of the canvas — `LAYER_BASE_SCALE`);

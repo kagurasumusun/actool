@@ -455,6 +455,10 @@ struct StackLayer {
     ty: f32,
     opacity: f32,
     blend: BlendMode,
+    /// Native point size of the source (SVG viewBox / image dimensions), so a
+    /// non-1024 / non-square layer keeps its aspect and isn't stretched.
+    native_w: u32,
+    native_h: u32,
 }
 
 /// Resolve each visible layer's source path, glass flag, placement, opacity and
@@ -516,6 +520,7 @@ fn collect_stack_layers(
             let is_glass = explicit || (glass_context && !opted_out);
             let frosted = is_glass && eff.translucency.enabled;
             let specular = is_glass && !eff.translucency.enabled && eff.specular;
+            let (native_w, native_h) = layer_native_size(&path);
             // Compose group∘layer, then map to canvas pixels by the base scale.
             out.push(StackLayer {
                 source: path,
@@ -526,19 +531,24 @@ fn collect_stack_layers(
                 ty: LAYER_BASE_SCALE * (gscale * lty + gty),
                 opacity,
                 blend,
+                native_w,
+                native_h,
             });
         }
     }
+    // icon.json lists groups/layers front-to-back (index 0 is the topmost);
+    // painter's order needs them back-to-front, so reverse.
+    out.reverse();
     out
 }
 
 /// Rasterize a layer source (SVG or raster) to `pixel_size`², straight RGBA.
-fn rasterize_layer(path: &Path, pixel_size: u32) -> Result<Vec<u8>> {
+fn rasterize_layer(path: &Path, w: u32, h: u32) -> Result<Vec<u8>> {
     let lower = path.to_string_lossy().to_lowercase();
     if lower.ends_with(".svg") {
         // CoreSVG renders premultiplied-first BGRA; unpremultiply to straight RGBA.
         let svg = fs::read(path)?;
-        let bgra = crate::svg_raster::rasterize_svg(&svg, pixel_size, pixel_size, 1)?;
+        let bgra = crate::svg_raster::rasterize_svg(&svg, w, h, 1)?;
         let mut rgba = vec![0u8; bgra.len()];
         for (o, px) in bgra.chunks_exact(4).enumerate() {
             let a = px[3];
@@ -551,9 +561,25 @@ fn rasterize_layer(path: &Path, pixel_size: u32) -> Result<Vec<u8>> {
         Ok(rgba)
     } else {
         let img = image::open(path)?.to_rgba8();
-        let resized =
-            image::imageops::resize(&img, pixel_size, pixel_size, FilterType::Lanczos3);
+        let resized = image::imageops::resize(&img, w, h, FilterType::Lanczos3);
         Ok(resized.into_raw())
+    }
+}
+
+/// The layer source's native point size (SVG viewBox / raster dimensions),
+/// used to render it at the right aspect inside the 1024-pt canvas.
+fn layer_native_size(path: &Path) -> (u32, u32) {
+    let lower = path.to_string_lossy().to_lowercase();
+    if lower.ends_with(".svg") {
+        if let Ok(svg) = fs::read(path) {
+            let (w, h) = crate::svg_raster::parse_svg_dimensions(&svg);
+            if w > 0 && h > 0 {
+                return (w, h);
+            }
+        }
+        (1024, 1024)
+    } else {
+        image::image_dimensions(path).unwrap_or((1024, 1024))
     }
 }
 
@@ -655,25 +681,28 @@ fn render_layer_stack(layers: &[StackLayer], pixel_size: u32) -> Result<Vec<u8>>
     let mut any_specular = false;
     let f = pixel_size as f32 / 1024.0;
     for layer in layers {
-        // Rasterize the layer at its scaled size and blit it onto the canvas
-        // centred + translated per its resolved placement.
-        let target = ((layer.scale * pixel_size as f32).round() as u32).max(1);
-        let src = rasterize_layer(&layer.source, target)?;
-        let ts = target as i64;
+        // Render at the layer's native aspect, scaled by base·group·layer (so a
+        // non-1024 / non-square SVG keeps its proportions), then blit centred +
+        // translated per its resolved placement.
+        let k = layer.scale * f;
+        let rw = ((layer.native_w as f32 * k).round() as u32).max(1);
+        let rh = ((layer.native_h as f32 * k).round() as u32).max(1);
+        let src = rasterize_layer(&layer.source, rw, rh)?;
+        let (rw, rh) = (rw as i64, rh as i64);
         let half = pixel_size as f32 / 2.0;
-        let ox = (half + layer.tx * f - target as f32 / 2.0).round() as i64;
-        let oy = (half + layer.ty * f - target as f32 / 2.0).round() as i64;
-        for ly in 0..ts {
+        let ox = (half + layer.tx * f - rw as f32 / 2.0).round() as i64;
+        let oy = (half + layer.ty * f - rh as f32 / 2.0).round() as i64;
+        for ly in 0..rh {
             let cy = oy + ly;
             if cy < 0 || cy >= w as i64 {
                 continue;
             }
-            for lx in 0..ts {
+            for lx in 0..rw {
                 let cx = ox + lx;
                 if cx < 0 || cx >= w as i64 {
                     continue;
                 }
-                let si = ((ly * ts + lx) * 4) as usize;
+                let si = ((ly * rw + lx) * 4) as usize;
                 // Layer opacity scales the source alpha.
                 let sa = (src[si + 3] as f32 * layer.opacity).round() as u8;
                 if sa == 0 {
@@ -2212,7 +2241,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let red = dir.join("red.png");
         write_solid_png(&red, [255, 0, 0, 255]);
-        let layers = vec![StackLayer { source: red, frosted: true, specular: false, scale: 1.0, tx: 0.0, ty: 0.0, opacity: 1.0, blend: BlendMode::Normal }];
+        let layers = vec![StackLayer { source: red, frosted: true, specular: false, scale: 1.0, tx: 0.0, ty: 0.0, opacity: 1.0, blend: BlendMode::Normal, native_w: 64, native_h: 64 }];
         let out = render_layer_stack(&layers, 64).unwrap();
         let i = (32 * 64 + 32) * 4; // centre, premul-first BGRA
         let (b, g, r, a) = (out[i], out[i + 1], out[i + 2], out[i + 3]);
@@ -2226,10 +2255,54 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let red = dir.join("red2.png");
         write_solid_png(&red, [255, 0, 0, 255]);
-        let layers = vec![StackLayer { source: red, frosted: false, specular: false, scale: 1.0, tx: 0.0, ty: 0.0, opacity: 1.0, blend: BlendMode::Normal }];
+        let layers = vec![StackLayer { source: red, frosted: false, specular: false, scale: 1.0, tx: 0.0, ty: 0.0, opacity: 1.0, blend: BlendMode::Normal, native_w: 64, native_h: 64 }];
         let out = render_layer_stack(&layers, 64).unwrap();
         let i = (32 * 64 + 32) * 4; // premul-first BGRA, opaque red
         assert_eq!((out[i], out[i + 1], out[i + 2], out[i + 3]), (0, 0, 255, 255));
+    }
+
+    #[test]
+    fn layer_keeps_native_aspect() {
+        // A 2:1 native layer must blit a 2:1 region, not a square — at scale 1
+        // and the 824/1024 base it's 824×412 wide, centred.
+        let dir = std::env::temp_dir().join(format!("aspect_t_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let red = dir.join("wide.png");
+        write_solid_png(&red, [255, 0, 0, 255]);
+        let layers = vec![StackLayer {
+            source: red,
+            frosted: false,
+            specular: false,
+            scale: LAYER_BASE_SCALE,
+            tx: 0.0,
+            ty: 0.0,
+            opacity: 1.0,
+            blend: BlendMode::Normal,
+            native_w: 256,
+            native_h: 128,
+        }];
+        let out = render_layer_stack(&layers, 1024).unwrap();
+        let opaque = |x: usize, y: usize| out[(y * 1024 + x) * 4 + 3] > 0;
+        let mut xs = (0, 0);
+        let mut ys = (0, 0);
+        for x in 0..1024 {
+            if opaque(x, 512) {
+                if xs.0 == 0 {
+                    xs.0 = x;
+                }
+                xs.1 = x;
+            }
+        }
+        for y in 0..1024 {
+            if opaque(512, y) {
+                if ys.0 == 0 {
+                    ys.0 = y;
+                }
+                ys.1 = y;
+            }
+        }
+        let aspect = (xs.1 - xs.0) as f32 / (ys.1 - ys.0) as f32;
+        assert!((aspect - 2.0).abs() < 0.1, "expected ~2:1, got {aspect:.2}");
     }
 
     #[test]
