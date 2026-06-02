@@ -216,10 +216,7 @@ pub fn compile_icon_bundle(
     ));
     fs::create_dir_all(&tmpdir)?;
     let primary_source = &source_images[0];
-    let primary_is_svg = primary_source
-        .to_string_lossy()
-        .to_lowercase()
-        .ends_with(".svg");
+    let primary_is_svg = is_svg_path(primary_source);
 
     // (filepath, pixel_size, scale) — fed to build_icon_car
     let mut icon_images: Vec<(PathBuf, u32, u32)> = Vec::new();
@@ -236,7 +233,6 @@ pub fn compile_icon_bundle(
             let pixel_size = point_size * scale;
             let bgra =
                 crate::svg_raster::rasterize_svg(&svg_data, *point_size, *point_size, *scale)?;
-            let pixel_pf = b"BGRA";
             let mut rgba = bgra.clone();
             for px in rgba.chunks_exact_mut(4) {
                 px.swap(0, 2);
@@ -247,7 +243,6 @@ pub fn compile_icon_bundle(
             let filepath = tmpdir.join(&filename);
             img.save(&filepath)?;
             icon_images.push((filepath, pixel_size, *scale));
-            let _ = pixel_pf;
         }
     } else {
         let src_img = image::open(primary_source)?.to_rgba8();
@@ -694,9 +689,13 @@ fn collect_stack_layers(
 }
 
 /// Rasterize a layer source (SVG or raster) to `pixel_size`², straight RGBA.
+/// Whether a layer/source path is an SVG (case-insensitive extension).
+fn is_svg_path(path: &Path) -> bool {
+    path.to_string_lossy().to_lowercase().ends_with(".svg")
+}
+
 fn rasterize_layer(path: &Path, w: u32, h: u32) -> Result<Vec<u8>> {
-    let lower = path.to_string_lossy().to_lowercase();
-    if lower.ends_with(".svg") {
+    if is_svg_path(path) {
         // CoreSVG renders premultiplied-first BGRA; unpremultiply to straight RGBA.
         let svg = fs::read(path)?;
         let bgra = crate::svg_raster::rasterize_svg(&svg, w, h, 1)?;
@@ -720,8 +719,7 @@ fn rasterize_layer(path: &Path, w: u32, h: u32) -> Result<Vec<u8>> {
 /// The layer source's native point size (SVG viewBox / raster dimensions),
 /// used to render it at the right aspect inside the 1024-pt canvas.
 fn layer_native_size(path: &Path) -> (u32, u32) {
-    let lower = path.to_string_lossy().to_lowercase();
-    if lower.ends_with(".svg") {
+    if is_svg_path(path) {
         if let Ok(svg) = fs::read(path) {
             let (w, h) = crate::svg_raster::parse_svg_dimensions(&svg);
             if w > 0 && h > 0 {
@@ -861,12 +859,11 @@ fn render_layer_stack(
         let k = layer.scale * f;
         let rw = ((layer.native_w as f32 * k).round() as u32).max(1);
         let rh = ((layer.native_h as f32 * k).round() as u32).max(1);
-        let cache_key = (layer.source.clone(), rw, rh);
-        if !raster_cache.contains_key(&cache_key) {
-            let raster = rasterize_layer(&layer.source, rw, rh)?;
-            raster_cache.insert(cache_key.clone(), raster);
-        }
-        let src = &raster_cache[&cache_key];
+        use std::collections::hash_map::Entry;
+        let src = match raster_cache.entry((layer.source.clone(), rw, rh)) {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => e.insert(rasterize_layer(&layer.source, rw, rh)?),
+        };
         let (rw, rh) = (rw as i64, rh as i64);
         let half = pixel_size as f32 / 2.0;
         let ox = (half + layer.tx * f - rw as f32 / 2.0).round() as i64;
@@ -1679,12 +1676,19 @@ struct GradientAsset {
 /// extended-gray (2 components) expand to a neutral triple; 4-component
 /// spaces (srgb / p3) pass their RGB through (p3→sRGB primaries differ, but
 /// the gray-axis backgrounds we composite are unaffected).
-fn color_to_rgb(c: &ColorAsset) -> [f64; 3] {
-    match c.components.as_slice() {
-        [g, _a] => [*g, *g, *g],
-        [r, g, b, _a] => [*r, *g, *b],
-        _ => [0.0, 0.0, 0.0],
+/// Drop the alpha from a parsed colour-spec's components and expand to RGB:
+/// `[gray, a]` → `[g, g, g]`, `[r, g, b, a]` → `[r, g, b]`. `None` for any
+/// other arity.
+fn comps_to_rgb(comps: &[f64]) -> Option<[f64; 3]> {
+    match comps {
+        [g, _a] => Some([*g, *g, *g]),
+        [r, g, b, _a] => Some([*r, *g, *b]),
+        _ => None,
     }
+}
+
+fn color_to_rgb(c: &ColorAsset) -> [f64; 3] {
+    comps_to_rgb(&c.components).unwrap_or([0.0, 0.0, 0.0])
 }
 
 /// Build per-size CoreGraphics drop-shadow parameters from a resolved
@@ -1808,11 +1812,7 @@ fn solid_fill_color(parsed: &IconJson) -> Option<[f64; 3]> {
     let Some(Fill::Structured(v)) = parsed.fill.as_ref() else { return None };
     let spec = v.get("solid").and_then(|x| x.as_str())?;
     let (_cspace, comps) = parse_color_spec(spec)?;
-    Some(match comps.as_slice() {
-        [g, _a] => [*g, *g, *g],
-        [r, g, b, _a] => [*r, *g, *b],
-        _ => return None,
-    })
+    comps_to_rgb(&comps)
 }
 
 /// Resolve the (light, dark) background fills the compositor draws under the

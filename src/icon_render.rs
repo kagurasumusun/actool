@@ -317,12 +317,11 @@ pub fn composite_icon(
             (s.ctx_restore)(ctx);
         }
 
-        // Clip everything else to the rounded-rect icon shape.
+        // Clip everything else to the squircle icon shape.
         (s.ctx_add_path)(ctx, path);
         (s.ctx_clip)(ctx);
 
-        // Background gradient. CoreGraphics y is bottom-up; icon.json y is
-        // top-down, so flip the y components when mapping to context points.
+        // Background gradient — two opaque stops.
         let comps: [c_double; 8] = [
             gradient.start_rgb[0],
             gradient.start_rgb[1],
