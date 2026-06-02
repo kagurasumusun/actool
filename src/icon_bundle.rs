@@ -1744,16 +1744,22 @@ fn resolve_gradient_fill(
     let g = grad.geometry;
     // Apple renders the icon background with the first stop at the TOP, last at
     // the bottom, regardless of how the stored geometry orders its endpoints —
-    // feishin keeps its [0.5,1.0]→[0.5,0.3] (start already on top) while
-    // scrumdinger/automatic [0.5,0.0]→[0.5,1.0] would otherwise render upside
-    // down. Anchor the first stop to the higher y, preserving the spread.
-    let (top_y, bot_y) = (g[1].max(g[3]), g[1].min(g[3]));
+    // feishin's [0.5,1.0]→[0.5,0.3] and scrumdinger/automatic [0.5,0.0]→[0.5,1.0]
+    // both render first-stop-on-top. The orientation only picks direction, NOT
+    // the span: Apple always draws the gradient across the FULL content box.
+    // feishin's literal y-range is 0.7 (1.0→0.3), but its rendered gradient
+    // spans the whole box just like scrumdinger's 1.0 range — measured on the
+    // background strip, the literal 0.7 span made ours too steep (slope 64 vs
+    // Apple's 48 gray/yfrac) and clip to white, off by up to 8.7/luma; spanning
+    // the full box drops it to ≈0.1. So anchor the endpoints to the box extremes
+    // (top→bottom), not the orientation magnitudes. All observed icon gradients
+    // are vertical (x constant), so keep x from the orientation.
+    let (top_y, bot_y) = (1.0f32, 0.0f32);
     // Apple lays the gradient axis inside the same content box layers use: the
     // normalized [0,1] orientation is inset by LAYER_BASE_SCALE about the
-    // centre, so a default top→bottom gradient spans canvas y ≈ [181,843], not
-    // the full squircle [100,924]. Measured on a black→white probe (gradient
-    // span 662 px = 824·LAYER_BASE_SCALE, centred); applies to x too for
-    // diagonal gradients.
+    // centre, so the full-box top→bottom gradient spans canvas y ≈ [181,843],
+    // not the full squircle [100,924]. Measured on a black→white probe (gradient
+    // span 662 px = 824·LAYER_BASE_SCALE, centred); applies to x too.
     let inset = |p: f32| 0.5 + (p - 0.5) * LAYER_BASE_SCALE;
     Some(crate::icon_render::GradientFill {
         start_rgb,

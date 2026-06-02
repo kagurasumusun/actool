@@ -151,11 +151,25 @@ use. With that inset element-web drops to ≈0.8/luma mean. The only gradient
 residual left is a thin (~30 px) bright highlight at the squircle's very top
 edge, not yet reproduced.
 
+A custom gradient's `orientation` sets only the **direction**, not the span:
+Apple always draws the gradient across the full inset content box. feishin's
+`orientation` y-range is `1.0→0.3` (literal span 0.7), but its rendered gradient
+covers the whole box exactly like scrumdinger's `0→1`. Using the literal 0.7 span
+made ours too steep (slope ≈64 vs Apple's ≈48 gray/yfrac) and clip to white — off
+by up to 8.7/luma on the background strip. `resolve_gradient_fill` now anchors the
+endpoints to the box extremes (top→bottom) regardless of the orientation
+magnitudes, dropping feishin's background gradient to ≈0.1/luma. Default-`[0,1]`
+gradients (scrumdinger/element-web) are unchanged.
+
 **Variant-axis bundles** (top-level `fill-specializations`, e.g. feishin /
 scrumdinger) store two grayscale variants. The two are **different in kind** —
 decoded directly with `tools/compare_variant_renditions.py`:
 - **Primary → GA8 = the light composite** (gradient + content, opaque). Matches
-  Apple to ≈6/luma.
+  Apple to ≈3/luma (feishin; scrumdinger ≈6, its residual being the layer's
+  glass shading, not the gradient — the `system-light` background gradient itself
+  is byte-close, ≈0.1/luma on the background strip). The remaining GA8 diff is the
+  renderer-bound "liquid glass" layer treatment + cup shadow, the same class as
+  the non-variant sized renditions.
 - **Alternate → GA16 = a flat dark *tint***, not a dark composite: a
   semi-transparent near-white squircle (premult gray ≈59, α ≈60) over the icon's
   black drop shadow, which CUICatalog overlays on the light icon for dark mode.
