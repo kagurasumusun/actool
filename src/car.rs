@@ -1497,12 +1497,16 @@ impl Rendition {
             let deploy_ver = parse_version(&self.min_deploy);
             let lzfse_min = min_lzfse_version(&self.platform);
             let use_aligned = deploy_ver >= lzfse_min;
-            // Apple uses deepmap2 only for BGRA renditions and KCBC
-            // (chunked-LZFSE) for the grayscale GA8/GA16 variant-axis
-            // renditions — verified by counting magics in feishin's `.car`
-            // (Apple: 0 dmp2, all KCBC). GA8 must therefore go through KCBC like
-            // GA16, not deepmap2.
-            let use_dmp2 = &self.pixel_format == b"BGRA" && self.part != PART_ICON;
+            // Apple compresses xcassets BGRA *and* GA8 renditions with deepmap2
+            // when its encoder finds it beneficial — verified on iina, where
+            // both Apple and we land on the same 7-deepmap2 / 110-lzfse split for
+            // BGRA (the Accelerate `vImageDeepmap2` heuristic mirrors Apple's),
+            // and Apple deepmap2's the two large grayscale GA8 icons (speed-dark)
+            // that we used to force through KCBC. The `.icon` variant axis is the
+            // exception: there Apple uses KCBC for *every* GA8/GA16 (feishin: 0
+            // dmp2), so PART_ICON stays off deepmap2.
+            let use_dmp2 = self.part != PART_ICON
+                && (&self.pixel_format == b"BGRA" || &self.pixel_format == b" 8AG");
 
             let mut pixel_data = self.pixel_data.clone();
             if use_aligned {
