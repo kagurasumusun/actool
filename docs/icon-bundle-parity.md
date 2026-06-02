@@ -68,11 +68,25 @@ every functional lookup.
   (gradients + layer + shadow + blur + specular + translucency) at each size.
   We reproduce the bulk of this (see "Styling pipeline" below): the layer over
   the background gradient, clipped to the macOS squircle, rendered with Apple's
-  own CoreSVG + CoreGraphics. The remaining per-pixel difference is the
-  proprietary "liquid glass" treatment — drop shadow, specular highlight and
-  the raised glass shading of the layer — for which there is no public
-  algorithm, so pixels (and compressed `SizeOnDisk`) still differ. Same class
-  as the dropped iOS app-icon atlas geometry (`atlas-packing.md`).
+  own CoreSVG + CoreGraphics. After the squircle/relief/lighting work the
+  per-rendition luma diff on the variant GA8/BGRA composites (decoded directly,
+  `tools/compare_variant_renditions.py`) is **feishin ≈1.3–1.4, element-web ≈1.3,
+  scrumdinger ≈4.5** at 256/512/1024 px (overall 1.5 / 2.6 / 3.0 incl. the
+  128 pt). The remaining residual is now narrow and well-located:
+  - **A thin antialiased boundary ring** (~±2/luma, within ~1 px of the squircle
+    edge): for feishin/element-web the *interior* is ≈0.4 — essentially exact —
+    and the whole residual is this ring. It is Apple's true squircle being a
+    hair fuller at the corners than a pure n=5 superellipse (the corner AA fringe
+    has higher coverage), i.e. sub-pixel rasterizer-level difference.
+  - **The 128 pt (256 px) rendition** is the outlier in every fixture (5–8 vs
+    ~1.4): Apple draws the icon **1 px larger at this one smallest size** (opaque
+    at x=24, margin 24, vs our consistent 25), producing a one-column-wide edge
+    error. The rule behind that 1 px enlargement isn't derivable from a single
+    size, so it's left unmatched (functionally irrelevant — CUICatalog uses the
+    stored pixels).
+  - **scrumdinger's frosted-glass layer body** (≈3.7 interior): the proprietary
+    part — see the "Variant-axis" note below.
+  Same class as the dropped iOS app-icon atlas geometry (`atlas-packing.md`).
 * **IconGroup CSI geometry** (TLV `0x03F4`). Apple stores the group's
   *computed* bounding box (e.g. feishin `[off 106,62, size 890,890]`) derived
   from the group `position.scale` (2.2) and the layer's scale/translation; we
@@ -87,8 +101,14 @@ every functional lookup.
 What `/usr/bin/actool` bakes into each non-variant sized rendition, recovered
 by rendering Apple's `.car` through CUICatalog (`tools/extract_pixels`):
 
-1. **Squircle clip** — a rounded-rect inset `100/1024` of the canvas with
-   corner radius `220/1024` (measured from Apple's 1024px output).
+1. **Squircle clip** — a **superellipse** `|x/a|ⁿ+|y/a|ⁿ=1` with `n=5.0`,
+   inset `100/1024` of the canvas (`build_squircle_path`, a densely-sampled
+   polygon CGPath). Fitted against Apple's `.car` alpha mask: n=5 matches to ≈2
+   px, vs ≈7 px for the best circular-arc rounded rect, which cut the corners
+   ~8-12 px too deep (a bright corner ring in the variant GA8 diff). The edge
+   glass-tile lighting uses the **same** superellipse distance field
+   (`squircle_sdf`), so its inner-edge highlight tracks the corners — a
+   rounded-rect SDF mis-placed it ~10 px at the corners (±30/luma).
 2. **Background** — for a gradient/automatic fill, the icon's light gradient
    (`Gradient-1`), its two stop colors and `orientation` from the palette. For a
    `solid` fill, the **flat solid colour** (`Color-2`): Apple's light rendition
@@ -165,11 +185,18 @@ gradients (scrumdinger/element-web) are unchanged.
 scrumdinger) store two grayscale variants. The two are **different in kind** —
 decoded directly with `tools/compare_variant_renditions.py`:
 - **Primary → GA8 = the light composite** (gradient + content, opaque). Matches
-  Apple to ≈3/luma (feishin; scrumdinger ≈6, its residual being the layer's
-  glass shading, not the gradient — the `system-light` background gradient itself
-  is byte-close, ≈0.1/luma on the background strip). The remaining GA8 diff is the
-  renderer-bound "liquid glass" layer treatment + cup shadow, the same class as
-  the non-variant sized renditions.
+  Apple to ≈1.4/luma (feishin) — interior ≈0.4, residual is the boundary AA ring.
+  scrumdinger is ≈4.5: its `system-light` background gradient is byte-close
+  (≈0.1/luma on the background strip) but its **frosted layer body** carries a
+  ≈3.7 interior residual. Apple's frosted glass darkens the layer body by a
+  *flat* ≈12.7/255 (≈5.1%) below the local background, top to bottom
+  (`GLASS_RELIEF_STRENGTH`; the old `0.025+0.012·y` ramp was a misfit). The
+  residual is that Apple's material **flattens the layer's internal structure**
+  into a uniform tint, while our relief still shows some of it — the stopwatch's
+  dark stem (top, over-darkened) and a bright see-through "bowl" at an inner
+  layer boundary (bottom). That flattening is the renderer-bound part; a probe
+  (`tools/layer_body`) confirms Apple's darkening is constant where ours ramps
+  ±12.
 - **Alternate → GA16 = a flat dark *tint***, not a dark composite: a
   semi-transparent near-white squircle (premult gray ≈59, α ≈60) over the icon's
   black drop shadow, which CUICatalog overlays on the light icon for dark mode.

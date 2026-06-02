@@ -1,14 +1,16 @@
 //! IconComposer-style compositing via CoreGraphics.
 //!
 //! macOS-26 `.icon` sized renditions aren't the bare layer — they are the
-//! layer composited over a gradient background and clipped to the rounded-rect
+//! layer composited over a gradient background and clipped to the macOS
 //! "squircle" icon shape. We reproduce that here with the same CoreGraphics
 //! rasterizer Apple's actool uses (so the gradient/mask antialiasing matches),
 //! drawing the already-rasterized layer (see [`crate::svg_raster`]) on top.
 //!
 //! Geometry was measured from `/usr/bin/actool` output: the icon shape is
-//! inset 100/1024 of the canvas on each side and the corners have radius
-//! 220/1024. The glass/specular/shadow treatments Apple applies on top are not
+//! inset 100/1024 of the canvas on each side and the corners follow the
+//! `SQUIRCLE_N` superellipse (n≈5, fitted against Apple's `.car` alpha mask —
+//! a circular-arc rounded rect cuts the corners ~8-12 px too deep). The
+//! glass/specular/shadow treatments Apple applies on top are only partly
 //! reproduced (no public algorithm); the gradient-squircle background is.
 
 use std::ffi::CString;
