@@ -44,8 +44,8 @@ type FnDeviceRgb = unsafe extern "C" fn() -> *mut c_void;
 type FnBitmapCreate =
     unsafe extern "C" fn(*mut c_void, usize, usize, usize, usize, *mut c_void, u32) -> *mut c_void;
 type FnBitmapData = unsafe extern "C" fn(*mut c_void) -> *mut u8;
-type FnPathRounded =
-    unsafe extern "C" fn(CGRect, c_double, c_double, *const c_void) -> *mut c_void;
+type FnPathCreateMutable = unsafe extern "C" fn() -> *mut c_void;
+type FnPathAddPoint = unsafe extern "C" fn(*mut c_void, *const c_void, c_double, c_double);
 type FnCtxPath = unsafe extern "C" fn(*mut c_void, *mut c_void);
 type FnCtx = unsafe extern "C" fn(*mut c_void);
 type FnGradCreate =
@@ -76,7 +76,10 @@ struct Syms {
     device_rgb: FnDeviceRgb,
     bitmap_create: FnBitmapCreate,
     bitmap_data: FnBitmapData,
-    path_rounded: FnPathRounded,
+    path_create_mutable: FnPathCreateMutable,
+    path_move: FnPathAddPoint,
+    path_line: FnPathAddPoint,
+    path_close: FnRelease,
     ctx_add_path: FnCtxPath,
     ctx_clip: FnCtx,
     ctx_save: FnCtx,
@@ -128,7 +131,10 @@ fn syms() -> Option<&'static Syms> {
             device_rgb: sym!("CGColorSpaceCreateDeviceRGB", FnDeviceRgb),
             bitmap_create: sym!("CGBitmapContextCreate", FnBitmapCreate),
             bitmap_data: sym!("CGBitmapContextGetData", FnBitmapData),
-            path_rounded: sym!("CGPathCreateWithRoundedRect", FnPathRounded),
+            path_create_mutable: sym!("CGPathCreateMutable", FnPathCreateMutable),
+            path_move: sym!("CGPathMoveToPoint", FnPathAddPoint),
+            path_line: sym!("CGPathAddLineToPoint", FnPathAddPoint),
+            path_close: sym!("CGPathCloseSubpath", FnRelease),
             ctx_add_path: sym!("CGContextAddPath", FnCtxPath),
             ctx_clip: sym!("CGContextClip", FnCtx),
             ctx_save: sym!("CGContextSaveGState", FnCtx),
@@ -215,6 +221,41 @@ pub struct ShadowParams {
 const MARGIN_RATIO: f64 = 100.0 / 1024.0;
 const CORNER_RATIO: f64 = 220.0 / 1024.0;
 
+/// macOS app-icon shape is a squircle — a superellipse |x/a|ⁿ + |y/a|ⁿ = 1, not
+/// a circular-arc rounded rect. Fitting Apple's `.car` alpha boundary (the icon
+/// mask of scrumdinger's 1024px rendition) gives n ≈ 5.0 to ≈2 px, vs ≈7 px for
+/// the best circular radius — a circular corner cuts ~8-12 px deeper into the
+/// corner than Apple's, which showed up as a bright corner ring in the variant
+/// GA8 diff. See `tools/fit_corner` / the corner-fit probe.
+const SQUIRCLE_N: f64 = 5.0;
+
+/// Build the icon-shape squircle as a polygon CGPath inscribed in `rect` (a
+/// square). The superellipse is sampled densely enough that the polygon is
+/// sub-pixel at the rendition size. Caller owns the returned path.
+unsafe fn build_squircle_path(s: &Syms, rect: CGRect) -> *mut c_void {
+    let a = rect.size.width / 2.0;
+    let cx = rect.origin.x + a;
+    let cy = rect.origin.y + a;
+    // Curvature concentrates near the corners; sample by edge length so even
+    // small renditions stay smooth there.
+    let steps = ((rect.size.width as usize).max(256)).min(2048);
+    let path = (s.path_create_mutable)();
+    let e = 2.0 / SQUIRCLE_N;
+    for i in 0..steps {
+        let t = (i as f64) / (steps as f64) * std::f64::consts::TAU;
+        let (st, ct) = t.sin_cos();
+        let x = cx + a * ct.signum() * ct.abs().powf(e);
+        let y = cy + a * st.signum() * st.abs().powf(e);
+        if i == 0 {
+            (s.path_move)(path, std::ptr::null(), x, y);
+        } else {
+            (s.path_line)(path, std::ptr::null(), x, y);
+        }
+    }
+    (s.path_close)(path);
+    path
+}
+
 /// Composite a sized rendition: the gradient background and the supplied layer
 /// (canvas-sized premultiplied-first BGRA), both clipped to the icon squircle,
 /// optionally preceded by a drop shadow. Returns premultiplied-first BGRA of
@@ -231,7 +272,6 @@ pub fn composite_icon(
         return None;
     }
     let margin = pixel_size as f64 * MARGIN_RATIO;
-    let corner = pixel_size as f64 * CORNER_RATIO;
     let content = pixel_size as f64 - 2.0 * margin;
 
     unsafe {
@@ -257,7 +297,7 @@ pub fn composite_icon(
             origin: CGPoint { x: margin, y: margin },
             size: CGSize { width: content, height: content },
         };
-        let path = (s.path_rounded)(rect, corner, corner, std::ptr::null());
+        let path = build_squircle_path(s, rect);
 
         // Drop shadow: fill the squircle opaque with the shadow set, so the
         // blurred copy bleeds into the margin. The opaque fill inside is then
