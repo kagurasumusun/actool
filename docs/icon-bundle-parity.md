@@ -153,10 +153,12 @@ edge, not yet reproduced.
 
 **Variant-axis bundles** (top-level `fill-specializations`, e.g. feishin /
 scrumdinger) store the *same* composite, just as grayscale: primary variant →
-GA8 (light gradient), alternate → GA16 (dark gradient). Decoding Apple's
-renditions (the `KCBC` = chunked-LZFSE envelope, 85 rows/chunk) confirmed they
-hold the gradient squircle, not a tint mask — so we composite there too and the
-GA8 matches Apple's to ≈6/luma. CUICatalog's *end-to-end* render of a
+GA8 (light gradient), alternate → GA16 (dark gradient). These use the **`KCBC`
+compression** (chunked-LZFSE, `height/3` rows per chunk) — matching Apple: we
+compress GA8 and GA16 with KCBC (not deepmap2), so a variant icon's `.car`
+carries the same codec selection as Apple's (feishin 0 dmp2 / 38 KCBC,
+scrumdinger 3 dmp2 — its BGRA renditions — like Apple). deepmap2 is used only
+for BGRA renditions, as Apple does. The stored GA8 matches Apple's to ≈6/luma. CUICatalog's *end-to-end* render of a
 variant-axis icon still differs (it recomposes the layer over the gradient via
 the iconstack, a structure we don't fully drive yet), but the stored rendition
 content now matches.

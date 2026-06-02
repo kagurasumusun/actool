@@ -1497,8 +1497,12 @@ impl Rendition {
             let deploy_ver = parse_version(&self.min_deploy);
             let lzfse_min = min_lzfse_version(&self.platform);
             let use_aligned = deploy_ver >= lzfse_min;
-            let use_dmp2 = &self.pixel_format == b" 8AG"
-                || (&self.pixel_format == b"BGRA" && self.part != PART_ICON);
+            // Apple uses deepmap2 only for BGRA renditions and KCBC
+            // (chunked-LZFSE) for the grayscale GA8/GA16 variant-axis
+            // renditions — verified by counting magics in feishin's `.car`
+            // (Apple: 0 dmp2, all KCBC). GA8 must therefore go through KCBC like
+            // GA16, not deepmap2.
+            let use_dmp2 = &self.pixel_format == b"BGRA" && self.part != PART_ICON;
 
             let mut pixel_data = self.pixel_data.clone();
             if use_aligned {
