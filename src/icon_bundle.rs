@@ -463,6 +463,16 @@ const GLASS_TINT_D: f32 = 63.5 / 255.0;
 /// widens the effective σ — tuned so our edge width matches Apple's ≈48 px.)
 const GLASS_BLUR_SIGMA: f32 = 18.0;
 
+/// A neutral (non-tinted) frosted layer darkens the background it sits over by a
+/// constant fraction — measured on Apple's scrumdinger GA8 as a flat ≈12.7/255
+/// (≈5.1%) below the local background across the *entire* layer body, top to
+/// bottom (`tools/layer_body` probe). The earlier `0.025 + 0.012·y` ramp was a
+/// misfit. Apple's frosted glass flattens the layer's internal structure into a
+/// uniform tint; our relief still preserves some of it (the layer-boundary
+/// "bowl" and the stem), so a ±-ramp residual remains — that flattening is the
+/// renderer-bound part. The flat level is the correct first-order match.
+const GLASS_RELIEF_STRENGTH: f32 = 0.051;
+
 /// Per-layer drop shadow (`shadow: layer-color`/`neutral`): a glass layer casts
 /// a soft shadow onto the background, offset down, tinted subtractively by
 /// `(1 − colour)` like the glass tint. Measured (`tools/probe_layer_shadow.py`):
@@ -907,13 +917,8 @@ fn render_layer_stack(
         // blur its edges (the soft "raised glass" look) before compositing it
         // over the layers.
         let mut glass_buf = vec![0u8; n * 4];
+        let strength = GLASS_RELIEF_STRENGTH;
         for y in 0..w {
-            // The glass itself only darkens the layer a few percent; the
-            // vertical relief the eye sees is mostly the background gradient
-            // showing through. Measured from Apple's scrumdinger GA8: ≈2.5% at
-            // the top rising to ≈3.5% at the bottom (out/bg ratio), constant
-            // enough that over the 252→236 gradient it grades ≈246→229.
-            let strength = 0.025 + 0.012 * (y as f32 / w as f32);
             for x in 0..w {
                 let i = y * w + x;
                 let cov = glass_cov[i] as f32 / 255.0;
