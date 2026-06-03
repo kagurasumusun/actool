@@ -1,7 +1,10 @@
 //! Byte-for-byte parity with Python's CoreSVG-based rasterizer.
 //!
 //! Both implementations call the same private framework entry points,
-//! so the raster output must match exactly.
+//! so the raster output must match exactly. CoreSVG is macOS-only, so the
+//! whole file is gated; the `has_coresvg()` check still covers a macOS host
+//! where the private framework can't be loaded.
+#![cfg(target_os = "macos")]
 
 use actool::svg_raster::{has_coresvg, rasterize_svg};
 
